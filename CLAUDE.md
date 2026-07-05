@@ -55,16 +55,32 @@
 ## 진행 상황
 - [x] 접근 전략 결정 (Playwright 우선, XML 이차)
 - [x] 초기 스켈레톤 코드 작성 (seibro_fund_distribution.py)
-- [ ] 실제 페이지 열어서 셀렉터 확정
-- [ ] 팝업 검색창 처리 로직 완성
+- [x] 실제 페이지 열어서 셀렉터 확정 (일부 — 아래 상세)
+- [ ] 팝업 검색창 처리 로직 완성 (검색 결과 행 클릭 셀렉터 미검증 — 다음 작업)
 - [ ] 결과 테이블 파싱 및 컬럼명 확정
 - [ ] XML POST endpoint 및 payload 리버스 (DevTools Network 캡처)
 - [ ] 다수 펀드 배치 조회
 - [ ] 엑셀 연동 (기존 월지급식 펀드 비교 파일과 결합)
 
+### 확정된 셀렉터 (2026-07-05 headless=False 실측)
+- 펀드 검색 아이콘: `#fn_group4` — 클릭해도 **새 브라우저 팝업이 뜨지 않음**.
+  같은 페이지 안의 레이어 팝업 `div#Lpopup_wrap` 이 표시되고, 그 안의
+  `iframe#iframeFnMn` 에 실제 검색 UI 로드됨
+  (src=`/IPORTAL/user/etc/BIP_CMUC01044P.xml&ret_code=KOR_SECN_CD&ret_code_nm=KOR_SECN_NM`)
+- iframe 내부 검색창: `input#search_string`, 검색 버튼: `a#group149`
+- 조회기간: `input#startDt_input` / `input#endDt_input`
+- 조회 버튼: `a.btn_seach` (href=`javascript:searchPList();`)
+- 펀드명 직접입력 필드도 메인 페이지에 존재: `input#KOR_SECN_NM` (텍스트),
+  `input#KOR_SECN_CD` (hidden) — 팝업 없이 이 필드에 바로 채워서 조회가
+  되는지는 미검증. 되면 팝업 로직을 아예 건너뛸 수 있어 다음에 우선 확인
+- 결과 그리드: id `gridDRConvList` 로 추정 (CSS 참조로만 확인, 실제 조회
+  성공 후 미검증)
+- **미검증**: "뱅크론" 검색 후 실제 결과 리스트 행(row) 셀렉터. 검증 도중
+  작업이 중단되어 다음 세션에서 이어서 확인 필요
+
 ## 개발 시 유의사항
 - 세이브로 페이지는 로드 후 WebSquare 초기화에 시간 걸림. `wait_for_load_state("networkidle")` 후에도 `time.sleep(1-2)` 필요
-- 펀드 검색은 팝업 창으로 열림. Playwright `page.wait_for_event("popup")` 또는 iframe 처리 필요
+- 펀드 검색은 새 브라우저 팝업이 아니라 같은 페이지 안의 레이어 팝업 + iframe 으로 열림. `page.wait_for_event("popup")` 은 안 걸림 — `iframe#iframeFnMn` 을 기다렸다가 `content_frame()` 으로 접근
 - 첫 실행은 `headless=False` 로 두고 실제 흐름 확인. 셀렉터 자동생성 ID (예: `_wq_uuid_...`) 는 매번 다를 수 있으니 `id*=` 부분매칭 또는 label/text 기반 셀렉터 우선
 - 조회 기간 기본값 3년. 이보다 오래된 데이터가 필요하면 여러 번 나눠 조회
 

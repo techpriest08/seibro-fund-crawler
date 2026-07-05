@@ -54,49 +54,64 @@ def _wait_websquare(page: Page, extra_sleep: float = 2.0) -> None:
     time.sleep(extra_sleep)
 
 
-def _open_fund_search_popup(page: Page) -> Page:
+def _open_fund_search_popup(page: Page):
     """
     펀드 검색 팝업 열기.
 
-    세이브로는 돋보기 아이콘 클릭 → 별도 팝업 창으로 검색창 오픈.
-    실제 셀렉터는 페이지 열어서 확인 후 조정 필요.
+    실측 결과, 돋보기 아이콘(#fn_group4)을 클릭해도 새 브라우저 창(popup)은 뜨지
+    않는다. 대신 같은 페이지 안에서 레이어 팝업(div#Lpopup_wrap)이 표시되고,
+    그 안의 iframe#iframeFnMn 에 실제 검색 UI가 로드된다.
+    (iframe src: /IPORTAL/user/etc/BIP_CMUC01044P.xml, ret_code=KOR_SECN_CD,
+     ret_code_nm=KOR_SECN_NM → 선택 시 이 값들이 메인 페이지 입력창에 채워짐)
+    따라서 page.expect_popup() 대신 iframe 을 기다렸다가 그 frame 을 반환한다.
     """
-    # TODO: 실제 셀렉터 확인 후 아래 수정
-    #   Claude Code 안에서 headless=False 로 열고 DevTools 로 확인.
-    #   후보: img[id*='btn_search'], a[id*='searchPopup'], input[title*='검색']
-    with page.expect_popup() as popup_info:
-        page.click("img[id*='search'], a[id*='search']", timeout=5000)
-    popup = popup_info.value
-    popup.wait_for_load_state("networkidle")
-    return popup
+    page.click("#fn_group4", timeout=5000)
+    page.wait_for_selector("#Lpopup_wrap", state="visible", timeout=5000)
+    iframe_el = page.wait_for_selector("#iframeFnMn", timeout=5000)
+    frame = iframe_el.content_frame()
+    frame.wait_for_load_state("networkidle", timeout=10000)
+    return frame
 
 
-def _search_fund_in_popup(popup: Page, keyword: str) -> None:
-    """팝업 창에서 펀드명 검색."""
-    # TODO: 실제 셀렉터로 교체
-    popup.fill("input[id*='searchWord'], input.wq_uuid_input", keyword)
-    popup.keyboard.press("Enter")
-    _wait_websquare(popup, extra_sleep=1.0)
+def _search_fund_in_popup(frame, keyword: str) -> None:
+    """
+    검색 팝업 iframe 내부에서 펀드명 검색.
 
-    # 첫 검색 결과 클릭
-    popup.click("table.gridTable tbody tr:first-child, "
-                "div[class*='gridRow']:first-child",
+    iframe 내부 검색창은 input#search_string (title="기업명 또는 종목코드를
+    입력하세요"), 검색 버튼은 a#group149(돋보기 이미지 #P_image1).
+
+    # TODO(미확정): 검색 결과 리스트의 실제 행 셀렉터는 검증 중 중단됨.
+    #   CSS 상 결과 영역은 div.pop_right > div.pop_list 안에 ul(예상 class
+    #   "dr_contentsList") > li > a 구조로 보이나, "뱅크론" 검색 후 실제 결과
+    #   행을 클릭해서 확인하지 못했다. 다음 세션에서 검증 필요:
+    #     1) frame.fill("#search_string", "뱅크론") 후 결과 스크린샷 확인
+    #     2) 실제 li/a 셀렉터를 DevTools 로 재확인 후 아래 교체
+    """
+    frame.fill("#search_string", keyword)
+    frame.click("#group149", timeout=5000)
+    time.sleep(1.0)
+
+    # 첫 검색 결과 클릭 (미검증 - 위 TODO 참고)
+    frame.click("div.pop_right li:first-child a, "
+                "ul[class*='dr_contentsList'] li:first-child a",
                 timeout=5000)
     time.sleep(1)
 
 
 def _set_date_range(page: Page, start: str, end: str) -> None:
-    """조회 기간 설정 (YYYYMMDD)."""
-    # TODO: 실제 셀렉터로 교체
-    page.fill("input[id*='StrtDt'], input[id*='startDt']", start)
-    page.fill("input[id*='EndDt'], input[id*='endDt']", end)
+    """조회 기간 설정 (YYYYMMDD). 확정: input#startDt_input, input#endDt_input."""
+    page.fill("#startDt_input", start)
+    page.fill("#endDt_input", end)
 
 
 def _click_inquire(page: Page) -> None:
-    """조회 버튼 클릭."""
-    # 세이브로는 '조회' 텍스트 링크나 이미지 버튼 사용
-    page.click("a:has-text('조회'), button:has-text('조회'), "
-               "img[alt='조회']", timeout=5000)
+    """
+    조회 버튼 클릭.
+
+    확정: a.btn_seach (href="javascript:searchPList();"), 내부 img#image2
+    alt="조회". 텍스트 라벨이 아니라 이미지라서 has-text 셀렉터로는 못 잡는다.
+    """
+    page.click("a.btn_seach img[alt='조회'], a.btn_seach", timeout=5000)
     _wait_websquare(page, extra_sleep=2.0)
 
 
@@ -104,14 +119,17 @@ def _parse_result_table(page: Page) -> list[list[str]]:
     """
     결과 테이블 파싱.
 
+    실측: 결과 그리드 id 는 CSS 셀렉터(#gridDRConvList_scrollX_left 등)로 미루어
+    "gridDRConvList" 로 추정됨 (검색 팝업 검증 중 중단되어 실제 조회 결과 행까지는
+    확인 못함 - 다음 세션에서 조회 성공 후 재검증 필요).
     세이브로 gridTable 구조는 일반 HTML table 이 아닌 div 기반일 수 있음.
-    첫 실행 시 실제 구조 확인 후 파서 조정.
     """
     rows_data: list[list[str]] = []
 
     # 시도 1: 일반 table
     table_rows = page.query_selector_all(
-        "table.gridTable tbody tr, table[id*='grid'] tbody tr"
+        "table.gridTable tbody tr, table[id*='gridDRConvList'] tbody tr, "
+        "table[id*='grid'] tbody tr"
     )
     for row in table_rows:
         cells = row.query_selector_all("td")
