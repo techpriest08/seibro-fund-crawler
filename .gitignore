@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 가상환경
+venv/
+.venv/
+env/
+.env
+
+# 크롤링 산출물
+*.csv
+*.xlsx
+!월지급식_펀드_31선_비교.xlsx    # 리서치 원본은 유지
+debug_screenshots/
+downloads/
+
+# Playwright
+test-results/
+playwright-report/
+.playwright/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# 로그
+*.log
