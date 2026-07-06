@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -65,9 +64,12 @@ def _open_fund_search_popup(page: Page):
      ret_code_nm=KOR_SECN_NM → 선택 시 이 값들이 메인 페이지 입력창에 채워짐)
     따라서 page.expect_popup() 대신 iframe 을 기다렸다가 그 frame 을 반환한다.
     """
+    # 참고: #Lpopup_wrap 은 wait_for_selector(state="visible") 로 기다리면
+    # Playwright 가 "hidden"으로 오판하는 경우가 있어(실측: aria-hidden="false"인
+    # 상태에서도 타임아웃 발생) state 체크 대신 짧은 sleep 후 iframe 을 바로 기다린다.
     page.click("#fn_group4", timeout=5000)
-    page.wait_for_selector("#Lpopup_wrap", state="visible", timeout=5000)
-    iframe_el = page.wait_for_selector("#iframeFnMn", timeout=5000)
+    time.sleep(1.5)
+    iframe_el = page.wait_for_selector("#iframeFnMn", timeout=8000)
     frame = iframe_el.content_frame()
     frame.wait_for_load_state("networkidle", timeout=10000)
     return frame
@@ -77,31 +79,33 @@ def _search_fund_in_popup(frame, keyword: str) -> None:
     """
     검색 팝업 iframe 내부에서 펀드명 검색.
 
-    iframe 내부 검색창은 input#search_string (title="기업명 또는 종목코드를
-    입력하세요"), 검색 버튼은 a#group149(돋보기 이미지 #P_image1).
-
-    # TODO(미확정): 검색 결과 리스트의 실제 행 셀렉터는 검증 중 중단됨.
-    #   CSS 상 결과 영역은 div.pop_right > div.pop_list 안에 ul(예상 class
-    #   "dr_contentsList") > li > a 구조로 보이나, "뱅크론" 검색 후 실제 결과
-    #   행을 클릭해서 확인하지 못했다. 다음 세션에서 검증 필요:
-    #     1) frame.fill("#search_string", "뱅크론") 후 결과 스크린샷 확인
-    #     2) 실제 li/a 셀렉터를 DevTools 로 재확인 후 아래 교체
+    확정된 구조:
+    - 검색창: input#search_string, 검색 버튼: a#group149
+    - 검색 결과 리스트: ul#isinList 안에 li > a[id$='_ISIN_ROW'] 로 각 펀드
+      한 건씩 나열됨. href="javascript:SelectedValueReturn(ISIN, 펀드명)" 이라서
+      ISIN 코드까지 이 시점에 이미 알 수 있음.
+    - 클릭하면 메인 페이지의 input#KOR_SECN_NM / input#KOR_SECN_CD 에 값이
+      채워지고 팝업이 자동으로 닫힘 ("뱅크론" 검색 → 23건 → 첫 결과 클릭 →
+      KOR_SECN_CD=KRZ501889310 로 채워짐을 실측 확인).
     """
     frame.fill("#search_string", keyword)
     frame.click("#group149", timeout=5000)
     time.sleep(1.0)
 
-    # 첫 검색 결과 클릭 (미검증 - 위 TODO 참고)
-    frame.click("div.pop_right li:first-child a, "
-                "ul[class*='dr_contentsList'] li:first-child a",
-                timeout=5000)
+    frame.click("ul#isinList li:first-child a", timeout=5000)
     time.sleep(1)
 
 
-def _set_date_range(page: Page, start: str, end: str) -> None:
-    """조회 기간 설정 (YYYYMMDD). 확정: input#startDt_input, input#endDt_input."""
-    page.fill("#startDt_input", start)
-    page.fill("#endDt_input", end)
+def _set_period(page: Page, period: str = "1년") -> None:
+    """
+    조회기간 프리셋 선택.
+
+    확정: select#sd1_selectbox1_input_0 (옵션: 1주/1개월/3개월/6개월/연초이후/
+    1년/2년/3년). input#startDt_input 에 직접 fill() 하면 위젯이 자체 검증 후
+    기본값(1년)으로 되돌리는 현상이 있어, 텍스트 직접 입력 대신 이 프리셋
+    드롭다운을 쓰는 쪽이 안정적이다.
+    """
+    page.select_option("#sd1_selectbox1_input_0", label=period)
 
 
 def _click_inquire(page: Page) -> None:
@@ -110,48 +114,94 @@ def _click_inquire(page: Page) -> None:
 
     확정: a.btn_seach (href="javascript:searchPList();"), 내부 img#image2
     alt="조회". 텍스트 라벨이 아니라 이미지라서 has-text 셀렉터로는 못 잡는다.
+
+    실측: page.click() 으로는 상단 GNB 드롭다운(ul.col_inner_ul)이 항상 DOM 상
+    겹쳐 있어서 "intercepts pointer events" 로 클릭이 계속 실패했다. href 가
+    이미 JS 함수 호출(searchPList())이라는 걸 알고 있으니 클릭 대신 그 함수를
+    직접 evaluate 로 호출하는 쪽이 훨씬 안정적이다.
     """
-    page.click("a.btn_seach img[alt='조회'], a.btn_seach", timeout=5000)
+    page.evaluate("searchPList()")
     _wait_websquare(page, extra_sleep=2.0)
 
 
-def _parse_result_table(page: Page) -> list[list[str]]:
+_GRID_ID = "gridFundExerList"
+
+# col_id 속성 → 한글 컬럼명. "뱅크론" 조회 결과 실측으로 확정.
+_COLUMN_LABELS = {
+    "RGT_STD_DT": "기준일자",
+    "RGT_RSN_DTAIL_SORT_NM": "배당구분",
+    "FIX_TPNM": "배당확정여부",
+    "ALOC_WHNM": "현금배당방법",
+    "CLERDIV_VAL": "청산상환분배금기준",
+    "PAY_TERM": "지급기간",
+    "SETACC_STDPRC": "결산기준가",
+    "SETACC_TAXSTD": "결산과표기준가",
+    "CASH_ALOC_AMT": "주당배당액",
+    "CASH_ALOC_RATIO": "주당배당율",
+    "TOT_DIV_PAY_AMT": "총분배금",
+    "TAX_TPNM": "세금구분",
+    "CLER_NOS": "청산차수",
+}
+
+
+def _parse_result_table(page: Page) -> pd.DataFrame:
     """
     결과 테이블 파싱.
 
-    실측: 결과 그리드 id 는 CSS 셀렉터(#gridDRConvList_scrollX_left 등)로 미루어
-    "gridDRConvList" 로 추정됨 (검색 팝업 검증 중 중단되어 실제 조회 결과 행까지는
-    확인 못함 - 다음 세션에서 조회 성공 후 재검증 필요).
-    세이브로 gridTable 구조는 일반 HTML table 이 아닌 div 기반일 수 있음.
+    실측 확정: 결과 그리드 id는 "gridFundExerList" (초기 추정했던
+    gridDRConvList는 틀렸음). 레코드 1건은 물리적으로 <tr> 2개에 걸쳐
+    표시되지만(rowspan/colspan 사용), 각 <td>는 col_id 속성으로 의미가
+    명확히 구분된다. "기준일자"(col_id=RGT_STD_DT, rowspan=2)가 다시
+    나타나는 시점을 새 레코드의 시작으로 판단해서 병합한다.
     """
-    rows_data: list[list[str]] = []
+    no_result = page.query_selector(f"div[id$='{_GRID_ID}_noresult']")
+    if no_result and no_result.is_visible():
+        return pd.DataFrame(columns=list(_COLUMN_LABELS.values()))
 
-    # 시도 1: 일반 table
-    table_rows = page.query_selector_all(
-        "table.gridTable tbody tr, table[id*='gridDRConvList'] tbody tr, "
-        "table[id*='grid'] tbody tr"
+    cells = page.eval_on_selector_all(
+        f"#{_GRID_ID}_body_tbody td[col_id]",
+        "els => els.map(el => ({col_id: el.getAttribute('col_id'), "
+        "text: el.innerText.trim()}))",
     )
-    for row in table_rows:
-        cells = row.query_selector_all("td")
-        if cells:
-            rows_data.append([c.inner_text().strip() for c in cells])
 
-    # 시도 2: div 기반 그리드 (WebSquare 커스텀)
-    if not rows_data:
-        div_rows = page.query_selector_all("div[class*='gridBodyDefault'] "
-                                            "div[class*='gridRowDefault']")
-        for row in div_rows:
-            cells = row.query_selector_all("div[class*='gridCell']")
-            if cells:
-                rows_data.append([c.inner_text().strip() for c in cells])
+    records: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for cell in cells:
+        col_id = cell["col_id"]
+        if col_id == "RGT_STD_DT" and current:
+            records.append(current)
+            current = {}
+        current[col_id] = cell["text"]
+    if current:
+        records.append(current)
 
-    return rows_data
+    # w2grid 는 부드러운 스크롤을 위해 빈 버퍼 행도 같이 렌더링한다(실측: "뱅크론"
+    # 첫 결과는 실제 데이터 1건인데 tbody에는 15개 tr이 잡힘). 기준일자가 빈
+    # 레코드는 버퍼 행이므로 제외.
+    records = [rec for rec in records if rec.get("RGT_STD_DT", "").strip()]
+
+    rows = [{_COLUMN_LABELS.get(k, k): v for k, v in rec.items()} for rec in records]
+    return pd.DataFrame(rows, columns=list(_COLUMN_LABELS.values()))
+
+
+def summarize_distribution_yield(df: pd.DataFrame) -> dict:
+    """
+    조회 기간 내 분배율 합계.
+
+    "주당배당율"은 세이브로가 이미 (주당배당액 / 결산기준가 * 100) 으로 계산해서
+    주는 값이다 - 1좌 기준이든 1,000좌 기준이든 비율(%)은 동일하므로 별도 스케일링
+    없이 그대로 쓰면 된다. 조회기간을 1년으로 걸었다면 이 합계가 곧
+    "1년간 1,000좌당 분배금이 1,000좌 금액 대비 몇 %인지"에 해당한다.
+    """
+    if df.empty:
+        return {"count": 0, "total_ratio_pct": 0.0}
+    ratio = pd.to_numeric(df["주당배당율"].str.replace(",", ""), errors="coerce").fillna(0.0)
+    return {"count": len(df), "total_ratio_pct": round(float(ratio.sum()), 4)}
 
 
 def crawl_fund_distribution(
     fund: FundQuery,
-    start_date: str | None = None,
-    end_date: str | None = None,
+    period: str = "1년",
     headless: bool = False,
     screenshot_dir: Path | None = None,
 ) -> pd.DataFrame:
@@ -160,18 +210,15 @@ def crawl_fund_distribution(
 
     Args:
         fund: 조회 대상 펀드 (FundQuery)
-        start_date: YYYYMMDD. None이면 3년 전
-        end_date:   YYYYMMDD. None이면 오늘
+        period: 조회기간 프리셋. "1주"/"1개월"/"3개월"/"6개월"/"연초이후"/
+                "1년"/"2년"/"3년" 중 하나. 기본 1년.
         headless:   True면 백그라운드. 개발 중엔 False 권장
         screenshot_dir: 디버깅용 스크린샷 저장 폴더. None이면 저장 안 함.
 
     Returns:
         분배금 이력 DataFrame
     """
-    start_date = start_date or (datetime.now() - timedelta(days=3 * 365)).strftime("%Y%m%d")
-    end_date = end_date or datetime.now().strftime("%Y%m%d")
-
-    log.info("펀드 조회 시작: %s (%s ~ %s)", fund.name, start_date, end_date)
+    log.info("펀드 조회 시작: %s (조회기간: %s)", fund.name, period)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -195,7 +242,7 @@ def crawl_fund_distribution(
                 page.screenshot(path=screenshot_dir / "02_after_select.png")
 
             # 3) 조회 기간 설정
-            _set_date_range(page, start_date, end_date)
+            _set_period(page, period)
 
             # 4) 조회
             _click_inquire(page)
@@ -203,27 +250,18 @@ def crawl_fund_distribution(
                 page.screenshot(path=screenshot_dir / "03_result.png")
 
             # 5) 결과 파싱
-            rows = _parse_result_table(page)
-            log.info("파싱된 행 개수: %d", len(rows))
+            df = _parse_result_table(page)
+            log.info("파싱된 행 개수: %d", len(df))
 
         except PWTimeout as e:
             log.error("타임아웃: %s", e)
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "error.png")
-            rows = []
+            df = pd.DataFrame(columns=list(_COLUMN_LABELS.values()))
         finally:
             browser.close()
 
-    # 컬럼명은 실제 페이지 확인 후 조정 필요
-    # 예상: [결산일, 지급일, 1좌당 분배금, 과세대상소득, 세후 분배금, ...]
-    columns_guess = ["결산일", "지급일", "1좌당분배금", "과세대상소득", "세후분배금"]
-    if not rows:
-        return pd.DataFrame(columns=columns_guess)
-
-    n_cols = len(rows[0])
-    columns = columns_guess[:n_cols] if n_cols <= len(columns_guess) \
-        else columns_guess + [f"col{i}" for i in range(n_cols - len(columns_guess))]
-    return pd.DataFrame(rows, columns=columns)
+    return df
 
 
 def batch_crawl(funds: list[FundQuery], output_csv: str = "distributions.csv") -> pd.DataFrame:
@@ -249,10 +287,15 @@ if __name__ == "__main__":
     test_fund = FundQuery(name="뱅크론")  # 검색어만 넣으면 팝업에서 첫 결과 선택
     df = crawl_fund_distribution(
         fund=test_fund,
-        start_date="20230101",
-        end_date="20260630",
+        period="1년",
         headless=False,
         screenshot_dir=Path("debug_screenshots"),
     )
     print(df)
     df.to_csv("test_result.csv", index=False, encoding="utf-8-sig")
+
+    summary = summarize_distribution_yield(df)
+    log.info(
+        "1년간 분배 %d회, 1,000좌 금액 대비 분배율 합계: %.4f%%",
+        summary["count"], summary["total_ratio_pct"],
+    )
