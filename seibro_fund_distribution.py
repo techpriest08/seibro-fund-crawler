@@ -20,10 +20,23 @@ URL: https://seibro.or.kr/websquare/control.jsp?w2xPath=/IPORTAL/user/fund/BIP_C
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+# PyInstaller로 묶은 exe 안에서는 Playwright가 브라우저 위치를 실행 시 임시로
+# 압축 해제되는 폴더(_MEIxxxxx) 기준으로 찾으려다 실패한다
+# ("BrowserType.launch: Executable doesn't exist at ..._MEIxxxxx\playwright\..."
+# 오류로 실측 확인). `playwright install chromium` 으로 실제 설치되는 위치인
+# 사용자 전역 캐시(%LOCALAPPDATA%\ms-playwright) 를 명시적으로 지정해서 우회한다.
+# playwright.sync_api를 import 하기 전에 설정해야 적용된다.
+if sys.platform == "win32":
+    os.environ.setdefault(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright"),
+    )
 
 import pandas as pd
 from playwright.sync_api import Page, TimeoutError as PWTimeout, sync_playwright
