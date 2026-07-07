@@ -1,7 +1,7 @@
 # SEIBro 펀드 분배금 크롤러
 
 ## 사용자 컨텍스트
-- 두원전자 개발팀 엔지니어 (모터 컨트롤러, 수가열 히터 담당)
+- 엔지니어 배경의 개인 투자자
 - 주력 언어: 한국어 반말, 간결/직접적 소통 선호
 - 답변 시 이름 부르지 말 것
 - 되묻지 말고 바로 진행. 애매하면 가정을 명시하고 진행
@@ -10,8 +10,8 @@
 한국 판매 월지급식 채권 펀드 (뱅크론, 하이일드 위주) 리서치용
 분배금 이력 데이터 수집. 최종적으로 다음과 연동:
 
-- 이미 작성된 월지급식 펀드 31개 비교 엑셀 파일
-- 지인 추천 부동산 담보 대출 펀드 (10%+ 분배율) 정체 파악
+- 보유 중인 월지급식 펀드 여러 개를 비교하는 엑셀 파일
+- 고배율(10%+) 분배 펀드가 원금을 갉아먹으면서 분배하는 건 아닌지 구조 파악
 - 향후 백테스트/수익률 계산
 
 ## 목표 산출물
@@ -47,14 +47,16 @@
 - 개발 환경: Windows
 
 ## 아키텍처 결정
-- `scraper/playwright_scraper.py`: UI 자동화 기반. 초기 개발 및 셀렉터 확보용
-- `scraper/xml_scraper.py`: 순수 XML POST 방식. 프로덕션용 (빠름, 안정적)
-- `scraper/common.py`: 공통 유틸 (날짜, 로깅, CSV 저장)
-- `main.py`: 엔트리포인트. 엑셀 파일에서 펀드 리스트 읽어서 배치 처리
+- `src/seibro_fund_distribution.py`: 크롤링 + 계산 로직 전체 (Playwright 기반).
+  CLI로 직접 실행 가능 (`python src/seibro_fund_distribution.py`)
+- `src/gui_app.py`: Tkinter GUI 프론트엔드. 위 모듈의 함수를 그대로 재사용하고
+  펀드명 입력창 + 조회 버튼 + 결과 표시만 담당. PyInstaller로 exe 패키징 대상
+- (미착수) XML POST 직접 호출 방식 — DevTools Network 캡처로 payload 확보 후
+  Playwright 없이 순수 HTTP로 재현하는 것이 목표 (아래 TODO 참고)
 
 ## 진행 상황
 - [x] 접근 전략 결정 (Playwright 우선, XML 이차)
-- [x] 초기 스켈레톤 코드 작성 (seibro_fund_distribution.py)
+- [x] 초기 스켈레톤 코드 작성 (src/seibro_fund_distribution.py)
 - [x] 실제 페이지 열어서 셀렉터 확정
 - [x] 팝업 검색창 처리 로직 완성 (검색 → 결과 선택 → 메인 페이지 반영까지 확인)
 - [x] 결과 테이블 파싱 및 컬럼명 확정 (그리드 id `gridFundExerList`, col_id 기반 파싱)
@@ -77,9 +79,9 @@
       전체 합계(시작/종료 AUM, 증감액/율)를 dict로 반환하도록 확장. 실측(AB
       월지급 글로벌 고수익): 1년간 순자산 4,773→2,665억원 (-44.17%) — 상당한
       원금 잠식이 실제로 확인됨
-- [x] **PyInstaller exe 패키징 (프로토타입)** — `gui_app.py` (Tkinter, 펀드명
+- [x] **PyInstaller exe 패키징 (프로토타입)** — `src/gui_app.py` (Tkinter, 펀드명
       입력창 + 조회 버튼 + 스크롤 가능한 결과 텍스트 영역) 작성 후
-      `python -m PyInstaller --onefile --windowed --name SeibroFundViewer gui_app.py`
+      `python -m PyInstaller --onefile --windowed --name SeibroFundViewer src/gui_app.py`
       로 빌드 성공. `dist/SeibroFundViewer.exe` (약 74MB) 더블클릭 시 창 뜨는 것까지
       확인함. **한계**: Chromium 브라우저 바이너리는 exe에 번들 안 됨 — 실행
       컴퓨터에 `playwright install chromium` 이 미리 되어 있어야 함. 완전
@@ -113,7 +115,7 @@
 - [ ] **AUM 1년 조회가 오래 걸림** — 페이지네이션 250개 행 모으는 데 30초
       정도 걸림(GUI에서는 분배내역 조회까지 합쳐 1~2분). 매 페이지 전환마다
       `time.sleep` 대기가 있어서 그런데, 더 짧게 줄일 수 있는지 확인 필요
-- [ ] **GUI 실사용 테스트** — `gui_app.py`/exe 창이 뜨는 것과 백그라운드 크롤링
+- [ ] **GUI 실사용 테스트** — `src/gui_app.py`/exe 창이 뜨는 것과 백그라운드 크롤링
       함수들이 개별적으로 동작하는 것은 확인했지만, 실제로 GUI에서 펀드명 입력
       → 조회 버튼 클릭 → 결과 표시까지 사람이 눌러보는 e2e 테스트는 아직 안 함
 - [ ] **시각화** — 지금 GUI는 결과를 텍스트(표 형태 문자열)로만 보여줌. 분배

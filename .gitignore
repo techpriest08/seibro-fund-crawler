@@ -13,12 +13,15 @@ venv/
 env/
 .env
 
-# 크롤링 산출물
+# 크롤링 산출물 / 개인 리서치 파일
 *.csv
 *.xlsx
-!월지급식_펀드_31선_비교.xlsx    # 리서치 원본은 유지
 debug_screenshots/
 downloads/
+
+# 개인 토큰/크레덴셜
+token_code.txt
+*.token
 
 # Playwright
 test-results/
