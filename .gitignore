@@ -25,6 +25,10 @@ test-results/
 playwright-report/
 .playwright/
 
+# PyInstaller 빌드 산출물 (74MB+ exe 등, .spec 파일은 트래킹 유지)
+build/
+dist/
+
 # IDE
 .vscode/
 .idea/

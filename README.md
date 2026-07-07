@@ -14,6 +14,23 @@ playwright install chromium
 python seibro_fund_distribution.py
 ```
 
+## GUI (exe) 로 실행
+
+터미널 명령어 없이 더블클릭으로 실행하고 싶으면 `gui_app.py` 를 PyInstaller 로
+패키징한다. 펀드명 입력창 + 조회 버튼이 있는 새 창이 뜨는 형태.
+
+```bash
+pip install pyinstaller
+python -m PyInstaller --noconfirm --onefile --windowed --name SeibroFundViewer gui_app.py
+```
+
+`dist/SeibroFundViewer.exe` 가 생성됨. 더블클릭하면 실행됨.
+
+**주의**: 이 exe 는 Playwright 자체 코드는 포함하지만 Chromium 브라우저 바이너리는
+번들하지 않는다 - 실행할 컴퓨터에 `playwright install chromium` 이 먼저 한 번
+되어 있어야 한다(다른 컴퓨터로 exe 만 복사해서 바로 실행하면 안 됨). 완전
+독립형으로 만들려면 Chromium 폴더까지 같이 묶는 작업이 추가로 필요함(다음 과제).
+
 ## Claude Code 로 이어서 작업할 때 첫 지시 예시
 
 ```

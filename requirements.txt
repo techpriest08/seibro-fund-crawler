@@ -3,3 +3,4 @@ pandas>=2.2
 lxml>=5.0
 requests>=2.32
 openpyxl>=3.1
+pyinstaller>=6.0   # exe 패키징용 (gui_app.py 빌드 시에만 필요)
