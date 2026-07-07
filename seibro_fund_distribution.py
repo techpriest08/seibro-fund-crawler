@@ -596,6 +596,45 @@ def summarize_aum_change_on_distribution(nav_df: pd.DataFrame) -> dict:
     }
 
 
+def summarize_aum_vs_distribution(dist_df: pd.DataFrame, aum_summary: dict) -> dict:
+    """
+    순자산 증감을 "분배로 빠져나간 것"과 "펀드 자체 운용손익"으로 나눠서 본다.
+
+    주의: "설정액"(FUND_SETUP_ORCP_AMT, 펀드 최초 모집 시 금액 - 고정값)과
+    "순자산"(FUND_NETASST_TOTAMT, 현재 시가 기준 총자산 - 매일 변동)은 다른
+    개념이다. AUM 추적은 항상 순자산 기준으로 하고, 설정액은 원자료 조회에서만
+    참고용으로 보여준다.
+
+    조회기간 동안 실제로 분배된 총 현금(총분배금 합계, dist_df의 "총분배금"
+    컬럼)만큼은 순자산이 줄어드는 게 당연하다(분배락). 그 효과를 되돌려서
+    ("순자산증감액" + "총분배유출액") 계산하면, 분배와 무관하게 펀드 자체
+    투자자산 가치가 늘었는지 줄었는지(순수 운용손익)를 따로 볼 수 있다.
+    """
+    total_distributed_원 = (
+        pd.to_numeric(dist_df["총분배금"].astype(str).str.replace(",", ""), errors="coerce").sum()
+        if not dist_df.empty else 0.0
+    )
+    total_distributed_억원 = round(float(total_distributed_원) / 1e8, 2)
+
+    start = aum_summary.get("period_start_aum_억원")
+    aum_change = aum_summary.get("period_aum_change_억원")
+    if start is None or aum_change is None:
+        return {
+            "total_distributed_억원": total_distributed_억원,
+            "aum_change_excl_distribution_억원": None,
+            "aum_change_excl_distribution_pct": None,
+        }
+
+    excl_distribution = round(aum_change + total_distributed_억원, 2)
+    excl_distribution_pct = round(excl_distribution / start * 100, 4) if start else None
+
+    return {
+        "total_distributed_억원": total_distributed_억원,
+        "aum_change_excl_distribution_억원": excl_distribution,
+        "aum_change_excl_distribution_pct": excl_distribution_pct,
+    }
+
+
 def batch_crawl(funds: list[FundQuery], output_csv: str = "distributions.csv") -> pd.DataFrame:
     """여러 펀드를 순차 조회하고 하나의 CSV 로 합침."""
     all_dfs = []
@@ -651,4 +690,12 @@ if __name__ == "__main__":
         aum_change["total_events_aum_change_억원"],
         aum_change["period_start_aum_억원"] or 0.0, aum_change["period_end_aum_억원"] or 0.0,
         aum_change["period_aum_change_pct"] or 0.0,
+    )
+
+    vs_dist = summarize_aum_vs_distribution(df, aum_change)
+    log.info(
+        "조회기간 총분배유출액 %.2f억원 | 분배 제외 순수 운용손익 %.2f억원 (%.4f%%)",
+        vs_dist["total_distributed_억원"],
+        vs_dist["aum_change_excl_distribution_억원"] or 0.0,
+        vs_dist["aum_change_excl_distribution_pct"] or 0.0,
     )

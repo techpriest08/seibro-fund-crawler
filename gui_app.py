@@ -21,6 +21,7 @@ from seibro_fund_distribution import (
     crawl_fund_distribution,
     crawl_fund_nav_history,
     summarize_aum_change_on_distribution,
+    summarize_aum_vs_distribution,
     summarize_distribution_yield,
 )
 
@@ -79,7 +80,8 @@ class App(tk.Tk):
             yield_summary = summarize_distribution_yield(dist_df)
             nav_df = crawl_fund_nav_history(fund, period="1년", headless=True)
             aum_summary = summarize_aum_change_on_distribution(nav_df)
-            self._result_queue.put(("ok", dist_df, yield_summary, nav_df, aum_summary))
+            vs_dist_summary = summarize_aum_vs_distribution(dist_df, aum_summary)
+            self._result_queue.put(("ok", dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary))
         except Exception as e:  # noqa: BLE001 - 백그라운드 스레드 예외를 GUI로 전달
             self._result_queue.put(("error", str(e)))
 
@@ -94,10 +96,10 @@ class App(tk.Tk):
                 self.status_var.set("오류 발생")
                 messagebox.showerror("오류", item[1])
             else:
-                _, dist_df, yield_summary, nav_df, aum_summary = item
+                _, dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary = item
                 matched_name = self._extract_matched_name(dist_df, nav_df)
                 self.status_var.set(f"조회 완료: {matched_name}" if matched_name else "조회 완료")
-                self._render_results(dist_df, yield_summary, nav_df, aum_summary, matched_name)
+                self._render_results(dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, matched_name)
         self.after(200, self._poll_queue)
 
     @staticmethod
@@ -118,6 +120,7 @@ class App(tk.Tk):
         yield_summary: dict,
         nav_df: pd.DataFrame,
         aum_summary: dict,
+        vs_dist_summary: dict,
         matched_name: str,
     ) -> None:
         # 표 안에도 "조회된펀드명" 컬럼이 매 행마다 반복되면 지저분하니, 맨 위
@@ -148,19 +151,29 @@ class App(tk.Tk):
         lines.append(dist_display.to_string(index=False) if not dist_display.empty else "(분배 이력 없음)")
         lines.append("")
 
-        lines.append("=== 조회기간 AUM(순자산) 변화 ===")
+        # 설정액(최초 모집금액, 고정값)과 순자산(현재 시가총액, 매일 변동)은 다른
+        # 개념이라 헷갈리면 안 됨 - 아래 AUM 비교는 전부 "순자산" 기준.
+        lines.append("=== 순자산(AUM) 1년 전 vs 지금 비교 ===")
+        lines.append("(주의: '설정액'은 펀드 최초 모집금액으로 고정값 - 아래는 전부 '순자산' 기준)")
         start = aum_summary["period_start_aum_억원"]
         end = aum_summary["period_end_aum_억원"]
         if start is not None:
+            lines.append(f"1년 전 순자산: {start:,.2f}억원")
+            lines.append(f"현재 순자산: {end:,.2f}억원")
             lines.append(
-                f"조회기간 전체 순자산: {start:,.2f}억원 → {end:,.2f}억원"
-                f" ({aum_summary['period_aum_change_억원']:+,.2f}억원,"
-                f" {aum_summary['period_aum_change_pct']:+.4f}%)"
+                f"순자산 증감: {aum_summary['period_aum_change_억원']:+,.2f}억원"
+                f" ({aum_summary['period_aum_change_pct']:+.4f}%)"
             )
-        lines.append(
-            f"분배 이벤트로 인한 순자산 증감 합계: "
-            f"{aum_summary['total_events_aum_change_억원']:+,.2f}억원"
-        )
+            lines.append(f"그 중 분배로 빠져나간 금액(총분배유출액): {vs_dist_summary['total_distributed_억원']:,.2f}억원")
+            excl = vs_dist_summary["aum_change_excl_distribution_억원"]
+            excl_pct = vs_dist_summary["aum_change_excl_distribution_pct"]
+            if excl is not None:
+                sign = "플러스(+)" if excl >= 0 else "마이너스(-)"
+                lines.append(
+                    f"분배 제외 순수 운용손익: {excl:+,.2f}억원 ({excl_pct:+.4f}%) — {sign}"
+                )
+        else:
+            lines.append("(AUM 데이터 없음)")
         lines.append("")
         lines.append("--- 분배일별 AUM 변화 상세 ---")
         lines.append(
@@ -170,7 +183,7 @@ class App(tk.Tk):
         )
         lines.append("")
 
-        lines.append("--- 기준가 / 순자산 일별 원자료 ---")
+        lines.append("--- 기준가 / 순자산 / 설정액 일별 원자료 ---")
         lines.append(nav_display.to_string(index=False) if not nav_display.empty else "(데이터 없음)")
 
         self.text.insert("1.0", "\n".join(lines))
