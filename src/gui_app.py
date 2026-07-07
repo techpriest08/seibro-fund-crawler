@@ -23,7 +23,25 @@ from seibro_fund_distribution import (
     summarize_aum_change_on_distribution,
     summarize_aum_vs_distribution,
     summarize_distribution_yield,
+    summarize_price_change,
 )
+
+
+def _condense_table(df: pd.DataFrame, head: int = 5, tail: int = 5) -> str:
+    """
+    긴 표는 앞/뒤 몇 줄만 보여주고 중간은 생략한다. 컬럼 폭이 head/tail 을 따로
+    to_string() 하면 서로 어긋날 수 있어서, 전체를 한 번에 문자열로 만든 뒤
+    줄 단위로 잘라낸다(그래야 컬럼 정렬이 유지됨).
+    """
+    if df.empty:
+        return "(데이터 없음)"
+    full_str = df.to_string(index=False)
+    lines = full_str.split("\n")
+    header, data_lines = lines[0], lines[1:]
+    if len(data_lines) <= head + tail:
+        return full_str
+    omitted = len(data_lines) - head - tail
+    return "\n".join([header, *data_lines[:head], f"... ({omitted}행 생략) ...", *data_lines[-tail:]])
 
 
 class App(tk.Tk):
@@ -81,7 +99,10 @@ class App(tk.Tk):
             nav_df = crawl_fund_nav_history(fund, period="1년", headless=True)
             aum_summary = summarize_aum_change_on_distribution(nav_df)
             vs_dist_summary = summarize_aum_vs_distribution(dist_df, aum_summary)
-            self._result_queue.put(("ok", dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary))
+            price_summary = summarize_price_change(nav_df)
+            self._result_queue.put(
+                ("ok", dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary)
+            )
         except Exception as e:  # noqa: BLE001 - 백그라운드 스레드 예외를 GUI로 전달
             self._result_queue.put(("error", str(e)))
 
@@ -96,10 +117,12 @@ class App(tk.Tk):
                 self.status_var.set("오류 발생")
                 messagebox.showerror("오류", item[1])
             else:
-                _, dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary = item
+                _, dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary = item
                 matched_name = self._extract_matched_name(dist_df, nav_df)
                 self.status_var.set(f"조회 완료: {matched_name}" if matched_name else "조회 완료")
-                self._render_results(dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, matched_name)
+                self._render_results(
+                    dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary, matched_name
+                )
         self.after(200, self._poll_queue)
 
     @staticmethod
@@ -121,6 +144,7 @@ class App(tk.Tk):
         nav_df: pd.DataFrame,
         aum_summary: dict,
         vs_dist_summary: dict,
+        price_summary: dict,
         matched_name: str,
     ) -> None:
         # 표 안에도 "조회된펀드명" 컬럼이 매 행마다 반복되면 지저분하니, 맨 위
@@ -146,6 +170,13 @@ class App(tk.Tk):
             f"분배율: 세전 {yield_summary['ratio_pct_pretax']:.4f}%"
             f" / 세후 {yield_summary['ratio_pct_posttax']:.4f}%"
         )
+        start_price = price_summary["start_price"]
+        end_price = price_summary["end_price"]
+        if start_price is not None:
+            lines.append(
+                f"1년간 기준가 변화: {start_price:,.2f}원 → {end_price:,.2f}원"
+                f" ({price_summary['change']:+,.2f}원, {price_summary['change_pct']:+.4f}%)"
+            )
         lines.append("")
         lines.append("--- 분배 이력 상세 ---")
         lines.append(dist_display.to_string(index=False) if not dist_display.empty else "(분배 이력 없음)")
@@ -175,7 +206,7 @@ class App(tk.Tk):
         else:
             lines.append("(AUM 데이터 없음)")
         lines.append("")
-        lines.append("--- 분배일별 AUM 변화 상세 ---")
+        lines.append("--- 분배일별 AUM 변화 상세 (조회기간 전체) ---")
         lines.append(
             events_df.to_string(index=False)
             if not events_df.empty
@@ -183,8 +214,9 @@ class App(tk.Tk):
         )
         lines.append("")
 
-        lines.append("--- 기준가 / 순자산 / 설정액 일별 원자료 ---")
-        lines.append(nav_display.to_string(index=False) if not nav_display.empty else "(데이터 없음)")
+        # 1년치 일별 원자료는 250행 가까이 되니 다 나열하지 않고 앞/뒤 일부만 보여줌
+        lines.append("--- 기준가 / 순자산 / 설정액 일별 원자료 (앞뒤 일부만 표시) ---")
+        lines.append(_condense_table(nav_display, head=5, tail=5))
 
         self.text.insert("1.0", "\n".join(lines))
 

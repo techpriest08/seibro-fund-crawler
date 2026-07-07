@@ -596,6 +596,32 @@ def summarize_aum_change_on_distribution(nav_df: pd.DataFrame) -> dict:
     }
 
 
+def summarize_price_change(nav_df: pd.DataFrame) -> dict:
+    """
+    조회기간 동안 기준가(NAV, 1,000좌 기준) 변화. 순자산(AUM)과는 별개로,
+    "펀드 가격 자체"가 얼마에서 얼마로 바뀌었는지를 본다.
+    """
+    empty = {"start_price": None, "end_price": None, "change": None, "change_pct": None}
+    if nav_df.empty:
+        return empty
+
+    df = nav_df.copy()
+    df["기준일"] = pd.to_datetime(df["기준일"], format="%Y/%m/%d")
+    df = df.sort_values("기준일")
+    price = pd.to_numeric(df["기준가"].astype(str).str.replace(",", ""), errors="coerce")
+
+    start_price = float(price.iloc[0])
+    end_price = float(price.iloc[-1])
+    change = end_price - start_price
+
+    return {
+        "start_price": round(start_price, 2),
+        "end_price": round(end_price, 2),
+        "change": round(change, 2),
+        "change_pct": round(change / start_price * 100, 4) if start_price else None,
+    }
+
+
 def summarize_aum_vs_distribution(dist_df: pd.DataFrame, aum_summary: dict) -> dict:
     """
     순자산 증감을 "분배로 빠져나간 것"과 "펀드 자체 운용손익"으로 나눠서 본다.
@@ -698,4 +724,11 @@ if __name__ == "__main__":
         vs_dist["total_distributed_억원"],
         vs_dist["aum_change_excl_distribution_억원"] or 0.0,
         vs_dist["aum_change_excl_distribution_pct"] or 0.0,
+    )
+
+    price_change = summarize_price_change(nav_df)
+    log.info(
+        "1년간 기준가 변화: %.2f원 → %.2f원 (%+.2f원, %+.4f%%)",
+        price_change["start_price"] or 0.0, price_change["end_price"] or 0.0,
+        price_change["change"] or 0.0, price_change["change_pct"] or 0.0,
     )
