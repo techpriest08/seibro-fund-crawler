@@ -82,9 +82,22 @@ class App(tk.Tk):
                 messagebox.showerror("오류", item[1])
             else:
                 _, dist_df, yield_summary, nav_df, aum_summary = item
-                self.status_var.set("조회 완료")
-                self._render_results(dist_df, yield_summary, nav_df, aum_summary)
+                matched_name = self._extract_matched_name(dist_df, nav_df)
+                self.status_var.set(f"조회 완료: {matched_name}" if matched_name else "조회 완료")
+                self._render_results(dist_df, yield_summary, nav_df, aum_summary, matched_name)
         self.after(200, self._poll_queue)
+
+    @staticmethod
+    def _extract_matched_name(dist_df: pd.DataFrame, nav_df: pd.DataFrame) -> str:
+        """
+        펀드명은 부분 검색이라 검색어와 실제로 조회된 펀드가 다를 수 있다
+        (예: "월지급"으로 검색하면 그 중 첫 번째 결과가 선택됨). crawl 함수들이
+        결과 DataFrame 맨 앞에 넣어주는 "조회된펀드명" 컬럼에서 실제 펀드명을 뽑는다.
+        """
+        for df in (dist_df, nav_df):
+            if not df.empty and "조회된펀드명" in df.columns:
+                return str(df["조회된펀드명"].iloc[0])
+        return ""
 
     def _render_results(
         self,
@@ -92,8 +105,12 @@ class App(tk.Tk):
         yield_summary: dict,
         nav_df: pd.DataFrame,
         aum_summary: pd.DataFrame,
+        matched_name: str,
     ) -> None:
         lines: list[str] = []
+        if matched_name:
+            lines.append(f"### 조회된 펀드: {matched_name} ###")
+            lines.append("")
         lines.append(
             f"=== 1년간 분배 {yield_summary['count']}회, "
             f"1,000좌 금액 대비 분배율 합계: {yield_summary['total_ratio_pct']:.4f}% ==="

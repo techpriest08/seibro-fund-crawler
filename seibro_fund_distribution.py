@@ -134,6 +134,20 @@ def _search_fund_in_popup(frame, keyword: str) -> None:
     time.sleep(1)
 
 
+def _get_selected_fund_name(page: Page) -> str:
+    """
+    검색 팝업에서 선택된 실제 펀드명을 메인 페이지에서 읽어온다.
+
+    검색어("월지급" 등)는 부분 매칭이라 결과가 여러 건 나올 수 있고, 코드는
+    항상 첫 번째 결과를 선택한다. 검색어와 실제로 선택된 펀드가 다를 수 있으니
+    input#KOR_SECN_NM 에 채워진 값을 읽어서 어떤 펀드가 조회됐는지 명확히 남긴다.
+    """
+    try:
+        return page.input_value("#KOR_SECN_NM")
+    except PWTimeout:
+        return ""
+
+
 def _set_period(page: Page, period: str = "1년") -> None:
     """
     조회기간 프리셋 선택.
@@ -286,6 +300,9 @@ def crawl_fund_distribution(
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "02_after_select.png")
 
+            matched_name = _get_selected_fund_name(page)
+            log.info("검색어 '%s' → 실제 조회된 펀드: %s", fund.name, matched_name)
+
             # 3) 조회 기간 설정
             _set_period(page, period)
 
@@ -296,6 +313,8 @@ def crawl_fund_distribution(
 
             # 5) 결과 파싱
             df = _parse_result_table(page)
+            if not df.empty:
+                df.insert(0, "조회된펀드명", matched_name)
             log.info("파싱된 행 개수: %d", len(df))
 
         except PWTimeout as e:
@@ -397,6 +416,9 @@ def crawl_fund_nav_history(
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "nav_01_selected.png")
 
+            matched_name = _get_selected_fund_name(page)
+            log.info("검색어 '%s' → 실제 조회된 펀드: %s", fund.name, matched_name)
+
             page.click("text=기준가/분배금", timeout=5000)
             _wait_websquare(page, extra_sleep=1.0)
 
@@ -406,6 +428,8 @@ def crawl_fund_nav_history(
                 page.screenshot(path=screenshot_dir / "nav_02_result.png")
 
             df = _parse_nav_grid(page)
+            if not df.empty:
+                df.insert(0, "조회된펀드명", matched_name)
             log.info("기준가/AUM 파싱된 행 개수: %d", len(df))
         except PWTimeout as e:
             log.error("타임아웃: %s", e)
