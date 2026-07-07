@@ -236,26 +236,57 @@ def _parse_result_table(page: Page) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=list(_COLUMN_LABELS.values()))
 
 
+# 배당소득세 14% + 지방소득세 1.4% (일반과세 개인투자자 기준). 실제로는 계좌
+# 종류(연금저축/ISA 등)나 금융소득종합과세 해당 여부에 따라 달라질 수 있어서
+# 세후 수치는 참고용 근사치다.
+KOREAN_DIVIDEND_TAX_RATE = 0.154
+
+
 def summarize_distribution_yield(df: pd.DataFrame) -> dict:
     """
-    조회 기간 내 분배율 합계.
+    조회 기간 내 분배 요약: 평균 기준가, 1,000좌당 분배금 합계, 세전/세후 분배율.
 
     실측 정정: 세이브로가 주는 "주당배당율"(CASH_ALOC_RATIO) 컬럼은 실제
-    월지급식 펀드로 테스트해보니 스케일이 안 맞아서 항상 0으로 나옴 - 이전
-    세션에서 "이미 계산돼서 온다"고 판단한 건 마스터펀드(분배 사실상 없음)로만
-    테스트해서 생긴 오판이었음. 원인: "결산기준가"(SETACC_STDPRC)는 한국 펀드
-    관례상 1,000좌당 가격인데, "주당배당액"(CASH_ALOC_AMT)은 컬럼명 그대로
-    1좌당 금액이라 1,000배 스케일 차이가 있음. 그래서 여기서는 세이브로 제공
-    비율 대신 (주당배당액 * 1000) / 결산기준가 * 100 을 직접 계산한다.
-    조회기간을 1년으로 걸었다면 이 합계가 곧 "1년간 1,000좌당 분배금이
-    1,000좌 금액 대비 몇 %인지"에 해당한다.
+    월지급식 펀드로 테스트해보니 스케일이 안 맞아서 항상 0으로 나옴 - 원인은
+    "결산기준가"(SETACC_STDPRC)는 한국 펀드 관례상 1,000좌당 가격인데
+    "주당배당액"(CASH_ALOC_AMT)은 컬럼명 그대로 1좌당 금액이라 1,000배 스케일
+    차이가 있어서다. 그래서 세이브로 제공값 대신 직접 계산한다.
+
+    비율만 보여주면 감이 잘 안 와서, 비교 기준이 되는 두 숫자(평균 기준가,
+    1,000좌당 분배금 합계)를 같이 보여주고 그걸로 비율을 계산하는 방식으로 변경
+    (기존에는 회차별 비율을 각각 구해서 합산했는데, 이제는 총분배금/평균기준가
+    방식). "주당배당액"은 원천징수 전 세전 금액으로 보고, 배당소득세
+    15.4%(세전액*0.154)를 뺀 세후 금액도 같이 계산한다.
     """
+    empty = {
+        "count": 0,
+        "avg_price": 0.0,
+        "total_dist_per_1000_pretax": 0.0,
+        "total_dist_per_1000_posttax": 0.0,
+        "ratio_pct_pretax": 0.0,
+        "ratio_pct_posttax": 0.0,
+    }
     if df.empty:
-        return {"count": 0, "total_ratio_pct": 0.0}
+        return empty
+
     amt = pd.to_numeric(df["주당배당액"].astype(str).str.replace(",", ""), errors="coerce").fillna(0.0)
-    base = pd.to_numeric(df["결산기준가"].astype(str).str.replace(",", ""), errors="coerce")
-    ratio_pct = (amt * 1000 / base * 100).fillna(0.0)
-    return {"count": len(df), "total_ratio_pct": round(float(ratio_pct.sum()), 4)}
+    price = pd.to_numeric(df["결산기준가"].astype(str).str.replace(",", ""), errors="coerce")
+
+    avg_price = float(price.mean())
+    total_pretax = float((amt * 1000).sum())
+    total_posttax = total_pretax * (1 - KOREAN_DIVIDEND_TAX_RATE)
+
+    ratio_pretax = round(total_pretax / avg_price * 100, 4) if avg_price else 0.0
+    ratio_posttax = round(total_posttax / avg_price * 100, 4) if avg_price else 0.0
+
+    return {
+        "count": len(df),
+        "avg_price": round(avg_price, 2),
+        "total_dist_per_1000_pretax": round(total_pretax, 2),
+        "total_dist_per_1000_posttax": round(total_posttax, 2),
+        "ratio_pct_pretax": ratio_pretax,
+        "ratio_pct_posttax": ratio_posttax,
+    }
 
 
 def crawl_fund_distribution(
@@ -372,12 +403,11 @@ def _click_nav_search(page: Page) -> None:
 
 def _parse_nav_grid(page: Page) -> pd.DataFrame:
     """
-    기준가/분배금 그리드 파싱.
+    기준가/분배금 그리드에서 현재 화면에 보이는 페이지 1개만 파싱.
 
     실측 확정: 그리드 id는 "grid5". 분배내역 그리드와 달리 레코드 1건이 <tr> 1개로
-    끝나는 단순 구조라 rowspan 병합이 필요 없음. 페이지당 10행씩 페이지네이션되고
-    (페이지 링크 id: gridPaging_page_N) 이 함수는 현재 화면에 보이는 페이지 1개만
-    파싱한다 - 전체 기간 페이지네이션 순회는 다음 과제.
+    끝나는 단순 구조라 rowspan 병합이 필요 없음. 페이지당 10행씩 페이지네이션됨
+    (페이지 링크 id: gridPaging_page_N) - 여러 페이지 순회는 _iterate_all_nav_pages 참고.
     """
     rows = page.eval_on_selector_all(
         f"#{_NAV_GRID_ID}_body_tbody tr.grid_body_row",
@@ -390,6 +420,66 @@ def _parse_nav_grid(page: Page) -> pd.DataFrame:
     return pd.DataFrame(mapped, columns=list(_NAV_COLUMN_LABELS.values()))
 
 
+def _click_next_nav_page(page: Page) -> bool:
+    """
+    기준가/분배금 그리드의 다음 페이지로 이동.
+
+    처음엔 #gridPaging_next_btn 이 "다음 페이지 그룹(10개씩)" 이동 버튼인 줄
+    알았는데, 실제 alt 텍스트는 "다음 페이지"(1페이지씩 전진)였다 - "첫 페이지"
+    (prevPage_btn) / "이전 페이지"(prev_btn) / "다음 페이지"(next_btn) /
+    "마지막 페이지"(nextPage_btn) 조합. 페이지 번호 링크 목록(#gridPaging_page_1
+    ~ _10)은 절대 페이지가 아니라 화면에 보이는 슬라이딩 윈도우라서, 그때그때
+    DOM에서 현재 선택된 링크(class="...label_selected")를 찾아 그 다음 링크를
+    클릭하고, 이미 마지막 링크면 "다음 페이지" 버튼으로 한 칸 전진한다.
+    """
+    page_links = page.query_selector_all("a[id^='gridPaging_page_']")
+    selected_idx = None
+    for i, el in enumerate(page_links):
+        cls = el.get_attribute("class") or ""
+        if "label_selected" in cls:
+            selected_idx = i
+            break
+
+    if selected_idx is not None and selected_idx + 1 < len(page_links):
+        page_links[selected_idx + 1].click()
+        return True
+
+    next_btn = page.query_selector("#gridPaging_next_btn a")
+    if next_btn is None:
+        return False
+    next_btn.click()
+    return True
+
+
+def _iterate_all_nav_pages(page: Page, max_pages: int = 30) -> pd.DataFrame:
+    """
+    기준가/분배금 그리드를 끝까지(또는 max_pages 까지) 페이지네이션 순회해서
+    조회기간 전체 데이터를 모은다. 페이지당 10행이므로 max_pages=30 이면 최대
+    300영업일(약 1년 남짓) 커버 가능. 새로 가져온 페이지에 이미 본 기준일자만
+    있으면(더 넘어갈 페이지가 없다는 뜻) 중단한다.
+    """
+    all_dfs: list[pd.DataFrame] = []
+    seen_dates: set[str] = set()
+
+    for _ in range(max_pages):
+        df_page = _parse_nav_grid(page)
+        if df_page.empty:
+            break
+        new_dates = set(df_page["기준일"]) - seen_dates
+        if not new_dates:
+            break
+        seen_dates.update(df_page["기준일"])
+        all_dfs.append(df_page)
+
+        if len(df_page) < 10:
+            break  # 마지막 페이지로 추정 (그리드가 10행 미만이면 더 없음)
+        if not _click_next_nav_page(page):
+            break
+        _wait_websquare(page, extra_sleep=1.0)
+
+    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+
+
 def crawl_fund_nav_history(
     fund: FundQuery,
     period: str = "1년",
@@ -398,7 +488,9 @@ def crawl_fund_nav_history(
 ) -> pd.DataFrame:
     """
     펀드종합정보 > 기준가/분배금 탭에서 일별 기준가·순자산(AUM, 억원)·분배금
-    이력을 가져온다. AUM 변화 추적의 데이터 소스.
+    이력을 가져온다. AUM 변화 추적의 데이터 소스. 그리드가 페이지당 10행씩
+    페이지네이션되는데 _iterate_all_nav_pages() 로 조회기간 전체를 순회해서 모은다
+    (1년 기준 최대 약 25페이지, 페이지 전환마다 대기 시간이 있어서 몇십 초 걸림).
     """
     log.info("펀드 기준가/AUM 조회 시작: %s (조회기간: %s)", fund.name, period)
 
@@ -427,10 +519,10 @@ def crawl_fund_nav_history(
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "nav_02_result.png")
 
-            df = _parse_nav_grid(page)
+            df = _iterate_all_nav_pages(page)
             if not df.empty:
                 df.insert(0, "조회된펀드명", matched_name)
-            log.info("기준가/AUM 파싱된 행 개수: %d", len(df))
+            log.info("기준가/AUM 파싱된 행 개수: %d (페이지네이션 전체 순회)", len(df))
         except PWTimeout as e:
             log.error("타임아웃: %s", e)
             if screenshot_dir:
@@ -442,19 +534,33 @@ def crawl_fund_nav_history(
     return df
 
 
-def summarize_aum_change_on_distribution(nav_df: pd.DataFrame) -> pd.DataFrame:
+def summarize_aum_change_on_distribution(nav_df: pd.DataFrame) -> dict:
     """
-    분배 지급일의 펀드 총자산(AUM) 변화를 계산.
+    분배 지급일의 펀드 총자산(AUM) 변화를 계산하고, 조회 기간 전체 합계도 낸다.
 
     실측 정정: "분배금"(TOT_DIV_PAY_AMT) 컬럼은 이 그리드에서는 대부분 빈 값으로
     나오고, 대신 "비고"(RGT_RACD) 컬럼에 "배당/분배" 라벨이 붙는 방식으로 분배일을
     표시함(결산일과 실제 기준가 반영일이 달라서 그런 것으로 추정 - 분배내역 페이지의
     "기준일자"와 날짜가 다를 수 있음). 그래서 "비고"에 값이 있는 행을 분배 이벤트로
-    잡아서 전일 대비 순자산(억원) 증감액/증감율을 계산한다. "분배금" 값이 실제로
-    채워져 있는 경우엔 (분배금 / 전일 순자산) 비율도 같이 계산.
+    잡아서 전일 대비 순자산(억원) 증감액/증감율을 계산한다.
+
+    반환값:
+    - events: 분배 이벤트별 상세 내역 (기준일, 순자산, 전일 대비 증감 등)
+    - total_events_aum_change_억원: 조회 기간 내 분배 이벤트들에서의 순자산 증감 합계
+    - period_start_aum_억원 / period_end_aum_억원: 조회 기간 처음/마지막 날 순자산
+    - period_aum_change_억원 / period_aum_change_pct: 조회 기간 전체 순자산 증감액/율
+      (분배뿐 아니라 운용손익 등 다른 요인도 섞인 총 변화라서 위 분배 이벤트 합계와는 다름)
     """
+    empty = {
+        "events": pd.DataFrame(),
+        "total_events_aum_change_억원": 0.0,
+        "period_start_aum_억원": None,
+        "period_end_aum_억원": None,
+        "period_aum_change_억원": None,
+        "period_aum_change_pct": None,
+    }
     if nav_df.empty:
-        return pd.DataFrame()
+        return empty
 
     df = nav_df.copy()
     df["기준일"] = pd.to_datetime(df["기준일"], format="%Y/%m/%d")
@@ -470,11 +576,24 @@ def summarize_aum_change_on_distribution(nav_df: pd.DataFrame) -> pd.DataFrame:
     events["분배금_전일순자산비율(%)"] = (
         events["분배금_억원"] / events["전일순자산_억원"] * 100
     ).round(4)
-
-    return events[[
+    events = events[[
         "기준일", "비고", "순자산_억원", "전일순자산_억원", "순자산증감_억원",
         "순자산증감율(%)", "분배금_억원", "분배금_전일순자산비율(%)",
     ]].reset_index(drop=True)
+
+    start_aum = float(df["순자산_억원"].iloc[0])
+    end_aum = float(df["순자산_억원"].iloc[-1])
+    period_change = end_aum - start_aum
+
+    return {
+        "events": events,
+        "total_events_aum_change_억원": round(float(events["순자산증감_억원"].sum()), 2)
+        if not events.empty else 0.0,
+        "period_start_aum_억원": round(start_aum, 2),
+        "period_end_aum_억원": round(end_aum, 2),
+        "period_aum_change_억원": round(period_change, 2),
+        "period_aum_change_pct": round(period_change / start_aum * 100, 4) if start_aum else None,
+    }
 
 
 def batch_crawl(funds: list[FundQuery], output_csv: str = "distributions.csv") -> pd.DataFrame:
@@ -509,13 +628,16 @@ if __name__ == "__main__":
 
     summary = summarize_distribution_yield(df)
     log.info(
-        "1년간 분배 %d회, 1,000좌 금액 대비 분배율 합계: %.4f%%",
-        summary["count"], summary["total_ratio_pct"],
+        "1년간 분배 %d회, 평균 기준가 %.2f, 1,000좌당 분배금 합계 세전 %.2f원"
+        " / 세후 %.2f원, 분배율 세전 %.4f%% / 세후 %.4f%%",
+        summary["count"], summary["avg_price"],
+        summary["total_dist_per_1000_pretax"], summary["total_dist_per_1000_posttax"],
+        summary["ratio_pct_pretax"], summary["ratio_pct_posttax"],
     )
 
     nav_df = crawl_fund_nav_history(
         fund=test_fund,
-        period="1개월",
+        period="1년",
         headless=False,
         screenshot_dir=Path("debug_screenshots"),
     )
@@ -523,4 +645,10 @@ if __name__ == "__main__":
     nav_df.to_csv("test_nav_result.csv", index=False, encoding="utf-8-sig")
 
     aum_change = summarize_aum_change_on_distribution(nav_df)
-    print(aum_change)
+    print(aum_change["events"])
+    log.info(
+        "분배 이벤트 순자산증감 합계 %.2f억원 | 조회기간 전체 순자산 %.2f→%.2f억원 (%.4f%%)",
+        aum_change["total_events_aum_change_억원"],
+        aum_change["period_start_aum_억원"] or 0.0, aum_change["period_end_aum_억원"] or 0.0,
+        aum_change["period_aum_change_pct"] or 0.0,
+    )

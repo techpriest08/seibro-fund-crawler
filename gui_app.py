@@ -16,6 +16,7 @@ from tkinter import messagebox, ttk
 import pandas as pd
 
 from seibro_fund_distribution import (
+    KOREAN_DIVIDEND_TAX_RATE,
     FundQuery,
     crawl_fund_distribution,
     crawl_fund_nav_history,
@@ -67,7 +68,7 @@ class App(tk.Tk):
             messagebox.showwarning("입력 필요", "펀드명을 입력하세요.")
             return
         self.query_btn.config(state="disabled")
-        self.status_var.set(f"'{name}' 조회 중... (몇십 초 걸릴 수 있습니다)")
+        self.status_var.set(f"'{name}' 조회 중... (AUM 1년치까지 모으느라 1~2분 걸릴 수 있습니다)")
         self.text.delete("1.0", "end")
         threading.Thread(target=self._run_query, args=(name,), daemon=True).start()
 
@@ -76,7 +77,7 @@ class App(tk.Tk):
             fund = FundQuery(name=name)
             dist_df = crawl_fund_distribution(fund, period="1년", headless=True)
             yield_summary = summarize_distribution_yield(dist_df)
-            nav_df = crawl_fund_nav_history(fund, period="1개월", headless=True)
+            nav_df = crawl_fund_nav_history(fund, period="1년", headless=True)
             aum_summary = summarize_aum_change_on_distribution(nav_df)
             self._result_queue.put(("ok", dist_df, yield_summary, nav_df, aum_summary))
         except Exception as e:  # noqa: BLE001 - 백그라운드 스레드 예외를 GUI로 전달
@@ -116,33 +117,62 @@ class App(tk.Tk):
         dist_df: pd.DataFrame,
         yield_summary: dict,
         nav_df: pd.DataFrame,
-        aum_summary: pd.DataFrame,
+        aum_summary: dict,
         matched_name: str,
     ) -> None:
         # 표 안에도 "조회된펀드명" 컬럼이 매 행마다 반복되면 지저분하니, 맨 위
         # 한 줄에만 펀드명을 남기고 표에서는 그 컬럼을 뺀다.
         dist_display = dist_df.drop(columns=["조회된펀드명"], errors="ignore")
         nav_display = nav_df.drop(columns=["조회된펀드명"], errors="ignore")
+        events_df = aum_summary["events"]
 
         lines: list[str] = []
         if matched_name:
             lines.append(f"조회된 펀드: {matched_name}")
             lines.append("")
+
+        lines.append("=== 1년간 분배율 (세전/세후) ===")
+        lines.append(f"분배 횟수: {yield_summary['count']}회")
+        lines.append(f"평균 기준가(1,000좌 기준): {yield_summary['avg_price']:,.2f}원")
         lines.append(
-            f"=== 1년간 분배 {yield_summary['count']}회, "
-            f"1,000좌 금액 대비 분배율 합계: {yield_summary['total_ratio_pct']:.4f}% ==="
+            f"1,000좌당 분배금 합계: 세전 {yield_summary['total_dist_per_1000_pretax']:,.2f}원"
+            f" / 세후 {yield_summary['total_dist_per_1000_posttax']:,.2f}원"
+            f" (배당소득세 {KOREAN_DIVIDEND_TAX_RATE * 100:.1f}% 가정)"
         )
+        lines.append(
+            f"분배율: 세전 {yield_summary['ratio_pct_pretax']:.4f}%"
+            f" / 세후 {yield_summary['ratio_pct_posttax']:.4f}%"
+        )
+        lines.append("")
+        lines.append("--- 분배 이력 상세 ---")
         lines.append(dist_display.to_string(index=False) if not dist_display.empty else "(분배 이력 없음)")
         lines.append("")
-        lines.append("=== 최근 기준가 / 순자산(AUM, 억원) ===")
-        lines.append(nav_display.to_string(index=False) if not nav_display.empty else "(데이터 없음)")
-        lines.append("")
-        lines.append("=== 분배일 AUM 변화 (최근 조회 범위 내) ===")
+
+        lines.append("=== 조회기간 AUM(순자산) 변화 ===")
+        start = aum_summary["period_start_aum_억원"]
+        end = aum_summary["period_end_aum_억원"]
+        if start is not None:
+            lines.append(
+                f"조회기간 전체 순자산: {start:,.2f}억원 → {end:,.2f}억원"
+                f" ({aum_summary['period_aum_change_억원']:+,.2f}억원,"
+                f" {aum_summary['period_aum_change_pct']:+.4f}%)"
+            )
         lines.append(
-            aum_summary.to_string(index=False)
-            if not aum_summary.empty
-            else "(조회 범위 내 분배 이벤트 없음 - 조회기간을 넓혀야 할 수 있음)"
+            f"분배 이벤트로 인한 순자산 증감 합계: "
+            f"{aum_summary['total_events_aum_change_억원']:+,.2f}억원"
         )
+        lines.append("")
+        lines.append("--- 분배일별 AUM 변화 상세 ---")
+        lines.append(
+            events_df.to_string(index=False)
+            if not events_df.empty
+            else "(조회 범위 내 분배 이벤트 없음)"
+        )
+        lines.append("")
+
+        lines.append("--- 기준가 / 순자산 일별 원자료 ---")
+        lines.append(nav_display.to_string(index=False) if not nav_display.empty else "(데이터 없음)")
+
         self.text.insert("1.0", "\n".join(lines))
 
 
