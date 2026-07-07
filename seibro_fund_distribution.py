@@ -20,12 +20,31 @@ URL: https://seibro.or.kr/websquare/control.jsp?w2xPath=/IPORTAL/user/fund/BIP_C
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 from playwright.sync_api import Page, TimeoutError as PWTimeout, sync_playwright
+
+# Windows 콘솔은 기본 코드페이지가 cp949라서, UTF-8 로그 문자열을 그대로 찍으면
+# 한글이 깨져 보인다("1�Ⱓ �й�..." 식). 콘솔 출력 코드페이지와 stdout/stderr
+# 인코딩을 UTF-8로 강제해서 어떤 터미널(cmd/PowerShell/Windows Terminal)에서
+# 실행하든 한글이 정상적으로 보이게 한다.
+if sys.platform == "win32":
+    import ctypes
+
+    try:
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +56,12 @@ log = logging.getLogger(__name__)
 SEIBRO_URL = (
     "https://seibro.or.kr/websquare/control.jsp"
     "?w2xPath=/IPORTAL/user/fund/BIP_CNTS05008V.xml&menuNo=152"
+)
+
+# 펀드종합정보 > 기준가/분배금 탭. 일별 기준가·순자산(AUM)·분배금을 같이 제공함.
+FUND_NAV_URL = (
+    "https://seibro.or.kr/websquare/control.jsp"
+    "?w2xPath=/IPORTAL/user/fund/BIP_CNTS05011V.xml&menuNo=155"
 )
 
 
@@ -188,15 +213,22 @@ def summarize_distribution_yield(df: pd.DataFrame) -> dict:
     """
     조회 기간 내 분배율 합계.
 
-    "주당배당율"은 세이브로가 이미 (주당배당액 / 결산기준가 * 100) 으로 계산해서
-    주는 값이다 - 1좌 기준이든 1,000좌 기준이든 비율(%)은 동일하므로 별도 스케일링
-    없이 그대로 쓰면 된다. 조회기간을 1년으로 걸었다면 이 합계가 곧
-    "1년간 1,000좌당 분배금이 1,000좌 금액 대비 몇 %인지"에 해당한다.
+    실측 정정: 세이브로가 주는 "주당배당율"(CASH_ALOC_RATIO) 컬럼은 실제
+    월지급식 펀드로 테스트해보니 스케일이 안 맞아서 항상 0으로 나옴 - 이전
+    세션에서 "이미 계산돼서 온다"고 판단한 건 마스터펀드(분배 사실상 없음)로만
+    테스트해서 생긴 오판이었음. 원인: "결산기준가"(SETACC_STDPRC)는 한국 펀드
+    관례상 1,000좌당 가격인데, "주당배당액"(CASH_ALOC_AMT)은 컬럼명 그대로
+    1좌당 금액이라 1,000배 스케일 차이가 있음. 그래서 여기서는 세이브로 제공
+    비율 대신 (주당배당액 * 1000) / 결산기준가 * 100 을 직접 계산한다.
+    조회기간을 1년으로 걸었다면 이 합계가 곧 "1년간 1,000좌당 분배금이
+    1,000좌 금액 대비 몇 %인지"에 해당한다.
     """
     if df.empty:
         return {"count": 0, "total_ratio_pct": 0.0}
-    ratio = pd.to_numeric(df["주당배당율"].str.replace(",", ""), errors="coerce").fillna(0.0)
-    return {"count": len(df), "total_ratio_pct": round(float(ratio.sum()), 4)}
+    amt = pd.to_numeric(df["주당배당액"].astype(str).str.replace(",", ""), errors="coerce").fillna(0.0)
+    base = pd.to_numeric(df["결산기준가"].astype(str).str.replace(",", ""), errors="coerce")
+    ratio_pct = (amt * 1000 / base * 100).fillna(0.0)
+    return {"count": len(df), "total_ratio_pct": round(float(ratio_pct.sum()), 4)}
 
 
 def crawl_fund_distribution(
@@ -264,6 +296,150 @@ def crawl_fund_distribution(
     return df
 
 
+_NAV_GRID_ID = "grid5"
+
+# col_id 속성 → 한글 컬럼명. 펀드종합정보 > 기준가/분배금 탭 실측으로 확정.
+_NAV_COLUMN_LABELS = {
+    "ANYTM_REPTG_DT": "기준일",
+    "NAV_AMT": "기준가",
+    "STDPRC_INCDEC_AMT": "전일대비",
+    "DD1_PRATE": "등락율",
+    "TAXSTD": "과표기준가",
+    "FUND_SETUP_ORCP_AMT": "설정액",
+    "FUND_NETASST_TOTAMT": "순자산",
+    "TOT_DIV_PAY_AMT": "분배금",
+    "RGT_RACD": "비고",
+}
+
+
+def _open_nav_search_popup(page: Page):
+    """
+    펀드종합정보 페이지의 검색 팝업 열기.
+
+    분배내역 페이지와 동일하게 iframe#iframeFnMn 레이어 팝업 구조지만, 검색
+    아이콘의 alt 텍스트가 "검색"으로 다르다(분배내역 페이지는 "검색하기").
+    """
+    page.click("img[alt*='검색'], a:has(img[alt*='검색'])", timeout=5000)
+    time.sleep(1.5)
+    iframe_el = page.wait_for_selector("#iframeFnMn", timeout=8000)
+    frame = iframe_el.content_frame()
+    frame.wait_for_load_state("networkidle", timeout=10000)
+    return frame
+
+
+def _set_nav_period(page: Page, period: str = "1년") -> None:
+    """조회기간 프리셋 선택. 확정: select#selectbox1_input_0 (분배내역 페이지와 다른 id)."""
+    page.select_option("#selectbox1_input_0", label=period)
+
+
+def _click_nav_search(page: Page) -> None:
+    """조회 버튼 클릭. 확정: a#group269 (href="#", 클릭 이벤트가 JS로 바인딩됨)."""
+    page.click("#group269", timeout=5000)
+    _wait_websquare(page, extra_sleep=1.5)
+
+
+def _parse_nav_grid(page: Page) -> pd.DataFrame:
+    """
+    기준가/분배금 그리드 파싱.
+
+    실측 확정: 그리드 id는 "grid5". 분배내역 그리드와 달리 레코드 1건이 <tr> 1개로
+    끝나는 단순 구조라 rowspan 병합이 필요 없음. 페이지당 10행씩 페이지네이션되고
+    (페이지 링크 id: gridPaging_page_N) 이 함수는 현재 화면에 보이는 페이지 1개만
+    파싱한다 - 전체 기간 페이지네이션 순회는 다음 과제.
+    """
+    rows = page.eval_on_selector_all(
+        f"#{_NAV_GRID_ID}_body_tbody tr.grid_body_row",
+        "trs => trs.map(tr => { const obj = {}; "
+        "tr.querySelectorAll('td[col_id]').forEach(td => { "
+        "obj[td.getAttribute('col_id')] = td.innerText.trim(); }); return obj; })",
+    )
+    rows = [r for r in rows if r.get("ANYTM_REPTG_DT", "").strip()]
+    mapped = [{_NAV_COLUMN_LABELS.get(k, k): v for k, v in r.items()} for r in rows]
+    return pd.DataFrame(mapped, columns=list(_NAV_COLUMN_LABELS.values()))
+
+
+def crawl_fund_nav_history(
+    fund: FundQuery,
+    period: str = "1년",
+    headless: bool = False,
+    screenshot_dir: Path | None = None,
+) -> pd.DataFrame:
+    """
+    펀드종합정보 > 기준가/분배금 탭에서 일별 기준가·순자산(AUM, 억원)·분배금
+    이력을 가져온다. AUM 변화 추적의 데이터 소스.
+    """
+    log.info("펀드 기준가/AUM 조회 시작: %s (조회기간: %s)", fund.name, period)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        context = browser.new_context(viewport={"width": 1440, "height": 900}, locale="ko-KR")
+        page = context.new_page()
+
+        try:
+            page.goto(FUND_NAV_URL, wait_until="domcontentloaded")
+            _wait_websquare(page)
+
+            frame = _open_nav_search_popup(page)
+            _search_fund_in_popup(frame, fund.isin or fund.name)
+            if screenshot_dir:
+                page.screenshot(path=screenshot_dir / "nav_01_selected.png")
+
+            page.click("text=기준가/분배금", timeout=5000)
+            _wait_websquare(page, extra_sleep=1.0)
+
+            _set_nav_period(page, period)
+            _click_nav_search(page)
+            if screenshot_dir:
+                page.screenshot(path=screenshot_dir / "nav_02_result.png")
+
+            df = _parse_nav_grid(page)
+            log.info("기준가/AUM 파싱된 행 개수: %d", len(df))
+        except PWTimeout as e:
+            log.error("타임아웃: %s", e)
+            if screenshot_dir:
+                page.screenshot(path=screenshot_dir / "nav_error.png")
+            df = pd.DataFrame(columns=list(_NAV_COLUMN_LABELS.values()))
+        finally:
+            browser.close()
+
+    return df
+
+
+def summarize_aum_change_on_distribution(nav_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    분배 지급일의 펀드 총자산(AUM) 변화를 계산.
+
+    실측 정정: "분배금"(TOT_DIV_PAY_AMT) 컬럼은 이 그리드에서는 대부분 빈 값으로
+    나오고, 대신 "비고"(RGT_RACD) 컬럼에 "배당/분배" 라벨이 붙는 방식으로 분배일을
+    표시함(결산일과 실제 기준가 반영일이 달라서 그런 것으로 추정 - 분배내역 페이지의
+    "기준일자"와 날짜가 다를 수 있음). 그래서 "비고"에 값이 있는 행을 분배 이벤트로
+    잡아서 전일 대비 순자산(억원) 증감액/증감율을 계산한다. "분배금" 값이 실제로
+    채워져 있는 경우엔 (분배금 / 전일 순자산) 비율도 같이 계산.
+    """
+    if nav_df.empty:
+        return pd.DataFrame()
+
+    df = nav_df.copy()
+    df["기준일"] = pd.to_datetime(df["기준일"], format="%Y/%m/%d")
+    df = df.sort_values("기준일").reset_index(drop=True)
+    df["순자산_억원"] = pd.to_numeric(df["순자산"].str.replace(",", ""), errors="coerce")
+    df["분배금_원"] = pd.to_numeric(df["분배금"].astype(str).str.replace(",", ""), errors="coerce")
+    df["전일순자산_억원"] = df["순자산_억원"].shift(1)
+    df["순자산증감_억원"] = df["순자산_억원"] - df["전일순자산_억원"]
+    df["순자산증감율(%)"] = (df["순자산증감_억원"] / df["전일순자산_억원"] * 100).round(4)
+
+    events = df[df["비고"].str.strip() != ""].copy()
+    events["분배금_억원"] = events["분배금_원"] / 1e8
+    events["분배금_전일순자산비율(%)"] = (
+        events["분배금_억원"] / events["전일순자산_억원"] * 100
+    ).round(4)
+
+    return events[[
+        "기준일", "비고", "순자산_억원", "전일순자산_억원", "순자산증감_억원",
+        "순자산증감율(%)", "분배금_억원", "분배금_전일순자산비율(%)",
+    ]].reset_index(drop=True)
+
+
 def batch_crawl(funds: list[FundQuery], output_csv: str = "distributions.csv") -> pd.DataFrame:
     """여러 펀드를 순차 조회하고 하나의 CSV 로 합침."""
     all_dfs = []
@@ -284,7 +460,7 @@ if __name__ == "__main__":
     # 개발/디버깅 모드: 브라우저 열고 스크린샷 저장
     Path("debug_screenshots").mkdir(exist_ok=True)
 
-    test_fund = FundQuery(name="뱅크론")  # 검색어만 넣으면 팝업에서 첫 결과 선택
+    test_fund = FundQuery(name="월지급")  # 검색어만 넣으면 팝업에서 첫 결과 선택
     df = crawl_fund_distribution(
         fund=test_fund,
         period="1년",
@@ -299,3 +475,15 @@ if __name__ == "__main__":
         "1년간 분배 %d회, 1,000좌 금액 대비 분배율 합계: %.4f%%",
         summary["count"], summary["total_ratio_pct"],
     )
+
+    nav_df = crawl_fund_nav_history(
+        fund=test_fund,
+        period="1개월",
+        headless=False,
+        screenshot_dir=Path("debug_screenshots"),
+    )
+    print(nav_df)
+    nav_df.to_csv("test_nav_result.csv", index=False, encoding="utf-8-sig")
+
+    aum_change = summarize_aum_change_on_distribution(nav_df)
+    print(aum_change)
