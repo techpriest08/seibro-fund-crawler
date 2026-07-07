@@ -43,8 +43,20 @@ class App(tk.Tk):
         self.status_var = tk.StringVar(value="펀드명을 입력하고 조회를 누르세요.")
         ttk.Label(self, textvariable=self.status_var, padding=(10, 0)).pack(anchor="w")
 
-        self.text = tk.Text(self, wrap="none", font=("Consolas", 10))
-        self.text.pack(fill="both", expand=True, padx=10, pady=10)
+        # 결과 표가 넓고 길어서 창을 키워도 다 안 보일 수 있음 - 세로/가로 스크롤 둘 다 추가
+        text_frame = ttk.Frame(self, padding=10)
+        text_frame.pack(fill="both", expand=True)
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+
+        self.text = tk.Text(text_frame, wrap="none", font=("Consolas", 10))
+        y_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.text.yview)
+        x_scroll = ttk.Scrollbar(text_frame, orient="horizontal", command=self.text.xview)
+        self.text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        self.text.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
 
         self._result_queue: queue.Queue = queue.Queue()
         self.after(200, self._poll_queue)
@@ -107,18 +119,23 @@ class App(tk.Tk):
         aum_summary: pd.DataFrame,
         matched_name: str,
     ) -> None:
+        # 표 안에도 "조회된펀드명" 컬럼이 매 행마다 반복되면 지저분하니, 맨 위
+        # 한 줄에만 펀드명을 남기고 표에서는 그 컬럼을 뺀다.
+        dist_display = dist_df.drop(columns=["조회된펀드명"], errors="ignore")
+        nav_display = nav_df.drop(columns=["조회된펀드명"], errors="ignore")
+
         lines: list[str] = []
         if matched_name:
-            lines.append(f"### 조회된 펀드: {matched_name} ###")
+            lines.append(f"조회된 펀드: {matched_name}")
             lines.append("")
         lines.append(
             f"=== 1년간 분배 {yield_summary['count']}회, "
             f"1,000좌 금액 대비 분배율 합계: {yield_summary['total_ratio_pct']:.4f}% ==="
         )
-        lines.append(dist_df.to_string(index=False) if not dist_df.empty else "(분배 이력 없음)")
+        lines.append(dist_display.to_string(index=False) if not dist_display.empty else "(분배 이력 없음)")
         lines.append("")
         lines.append("=== 최근 기준가 / 순자산(AUM, 억원) ===")
-        lines.append(nav_df.to_string(index=False) if not nav_df.empty else "(데이터 없음)")
+        lines.append(nav_display.to_string(index=False) if not nav_display.empty else "(데이터 없음)")
         lines.append("")
         lines.append("=== 분배일 AUM 변화 (최근 조회 범위 내) ===")
         lines.append(
