@@ -146,6 +146,16 @@
       또한 크롤 함수들이 PWTimeout 을 빈 DataFrame 으로 삼키던 것을
       "분배 이력 없는 펀드"와 구분 안 되는 문제 때문에 명시적 RuntimeError
       (한국어 안내)로 변경 — GUI 오류 팝업으로 사용자에게 전달됨
+- [x] **브라우저 자동 설치 (exe 완전 독립형 완성)** — setup.exe 없이
+      SeibroFundViewer.exe 만 복사해 간 컴퓨터에서 "BrowserType.launch:
+      Executable doesn't exist" 오류가 나던 문제의 근본 해결.
+      `_launch_chromium()`: launch 실패가 "Executable doesn't exist" 면
+      `_install_chromium()` 으로 자동 다운로드 후 1회 재시도. 설치는 exe 에
+      번들된 playwright 드라이버(node.exe + cli.js, pyi-archive_viewer 로 번들
+      확인)를 subprocess 로 호출 (`node cli.js install chromium --only-shell`,
+      CREATE_NO_WINDOW 로 콘솔 번쩍임 방지, headless=False 개발용이면 전체
+      chromium). 실측: 빈 PLAYWRIGHT_BROWSERS_PATH 에서 34초 만에 자동 설치
+      후 검색 23건 성공. 실패 시 "인터넷 연결 확인" 한국어 RuntimeError
 - [ ] XML POST endpoint 및 payload 리버스 (DevTools Network 캡처)
 - [ ] 다수 펀드 배치 조회 (batch_crawl 함수는 있으나 여러 펀드로 실측 안 함)
 - [ ] 엑셀 연동 (기존 월지급식 펀드 비교 파일과 결합)

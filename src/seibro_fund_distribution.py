@@ -39,7 +39,12 @@ if sys.platform == "win32":
     )
 
 import pandas as pd
-from playwright.sync_api import Page, TimeoutError as PWTimeout, sync_playwright
+from playwright.sync_api import (
+    Error as PWError,
+    Page,
+    TimeoutError as PWTimeout,
+    sync_playwright,
+)
 
 # Windows 콘솔은 기본 코드페이지가 cp949라서, UTF-8 로그 문자열을 그대로 찍으면
 # 한글이 깨져 보인다("1�Ⱓ �й�..." 식). 콘솔 출력 코드페이지와 stdout/stderr
@@ -100,6 +105,56 @@ def _wait_websquare(page: Page, extra_sleep: float = 2.0) -> None:
         log.warning("networkidle 15초 초과 - 3초 더 기다린 후 그대로 진행")
         time.sleep(3)
     time.sleep(extra_sleep)
+
+
+def _install_chromium(only_shell: bool = True) -> None:
+    """
+    크롤링용 Chromium 이 없을 때 최초 1회 자동 다운로드.
+
+    playwright 드라이버(node.exe + cli.js)는 PyInstaller exe 안에도 같이
+    번들되므로, exe 만 복사해 간 컴퓨터에서도 이 함수로 브라우저를 받아올 수
+    있다 ("Executable doesn't exist" 오류의 근본 해결). headless=True 만 쓰는
+    GUI 기준으로는 headless shell 만 있으면 되므로 --only-shell 로 용량을
+    아낀다 (~120MB). 다운로드 위치는 PLAYWRIGHT_BROWSERS_PATH.
+    """
+    import subprocess
+
+    from playwright._impl._driver import compute_driver_executable, get_driver_env
+
+    node, cli = compute_driver_executable()
+    env = get_driver_env()
+    env["PLAYWRIGHT_BROWSERS_PATH"] = os.environ.get(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright"),
+    )
+    args = [node, cli, "install", "chromium"]
+    if only_shell:
+        args.append("--only-shell")
+    log.warning("크롤링용 브라우저가 없어 자동 다운로드를 시작합니다 (~120MB, 몇 분 소요)")
+    # GUI(windowed) exe 에서 콘솔 창이 번쩍 뜨지 않게
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        subprocess.run(args, env=env, check=True, creationflags=creationflags, timeout=1800)
+    except Exception as e:  # noqa: BLE001 - 원인 불문 사용자 안내로 변환
+        raise RuntimeError(
+            "크롤링용 브라우저 자동 설치에 실패했습니다. 인터넷 연결을 확인한 뒤 "
+            "다시 시도해주세요."
+        ) from e
+    log.info("브라우저 자동 설치 완료")
+
+
+def _launch_chromium(p, headless: bool):
+    """
+    chromium 실행. 브라우저 미설치("Executable doesn't exist")면 자동 설치 후
+    1회 재시도한다. headless=False (개발용)면 전체 Chromium 을 받는다.
+    """
+    try:
+        return p.chromium.launch(headless=headless)
+    except PWError as e:
+        if "Executable doesn't exist" not in str(e):
+            raise
+        _install_chromium(only_shell=headless)
+        return p.chromium.launch(headless=headless)
 
 
 def _goto_with_retry(page: Page, url: str, ready_selector: str, retries: int = 2) -> None:
@@ -210,7 +265,7 @@ def search_funds(keyword: str, headless: bool = True) -> list[dict]:
     """
     log.info("펀드 검색 목록 조회: %s", keyword)
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = _launch_chromium(p, headless)
         context = browser.new_context(
             viewport={"width": 1440, "height": 900},
             locale="ko-KR",
@@ -417,7 +472,7 @@ def crawl_fund_distribution(
     log.info("펀드 조회 시작: %s (조회기간: %s)", fund.name, period)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = _launch_chromium(p, headless)
         context = browser.new_context(
             viewport={"width": 1440, "height": 900},
             locale="ko-KR",
@@ -606,7 +661,7 @@ def crawl_fund_nav_history(
     log.info("펀드 기준가/AUM 조회 시작: %s (조회기간: %s)", fund.name, period)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = _launch_chromium(p, headless)
         context = browser.new_context(viewport={"width": 1440, "height": 900}, locale="ko-KR")
         page = context.new_page()
 
