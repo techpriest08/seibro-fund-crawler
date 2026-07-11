@@ -246,14 +246,35 @@ def _search_fund_in_popup(frame, keyword: str, target_isin: str | None = None) -
     frame.click("#group149", timeout=5000)
     time.sleep(1.0)
 
+    # 검색 결과가 수천 건이면(예: "미래에셋" 2,240건) 물리 클릭은 스크롤/겹침
+    # 문제가 생길 수 있어 DOM click() 을 직접 호출한다 (href 가
+    # javascript:SelectedValueReturn(...) 이라 click() 만으로 선택이 실행됨)
     if target_isin:
-        frame.click(f"ul#isinList a[href*='{target_isin}']", timeout=5000)
+        sel = f"ul#isinList a[href*='{target_isin}']"
     else:
-        frame.click("ul#isinList li:first-child a", timeout=5000)
+        sel = "ul#isinList li:first-child a"
+    # 결과가 수천 건이면 목록 로딩이 몇 초 걸릴 수 있어 넉넉히 기다린다
+    frame.wait_for_selector(sel, state="attached", timeout=15000)
+    frame.eval_on_selector(sel, "el => el.click()")
     time.sleep(1)
 
 
-def search_funds(keyword: str, headless: bool = True) -> list[dict]:
+def _is_etf(isin: str, name: str) -> bool:
+    """
+    검색 결과가 ETF 인지 판별.
+
+    세이브로 펀드 검색 팝업에는 ETF(상장지수펀드)도 같이 나온다 (실측:
+    "미래에셋" 2,240건 중 285건이 TIGER ETF). ETF 는 이 분배내역 메뉴에
+    데이터가 없어 조회해도 빈 결과만 나오므로 목록에서 걸러낸다. 판별 기준:
+    - 이름에 "상장지수" (한국 ETF 의 법정 명칭 "…증권상장지수투자신탁")
+    - 이름에 "ETF"
+    - ISIN 이 KR7 로 시작 (상장 증권. 일반 공모펀드는 KRZ5 로 시작 - 실측)
+    """
+    compact = name.upper().replace(" ", "")
+    return "상장지수" in compact or "ETF" in compact or isin.startswith("KR7")
+
+
+def search_funds(keyword: str, headless: bool = True, exclude_etf: bool = True) -> list[dict]:
     """
     검색 팝업에서 keyword 로 펀드를 검색하고, 아무것도 선택하지 않은 채
     전체 결과 목록을 [{"isin": ..., "name": ...}, ...] 로 반환한다.
@@ -262,6 +283,8 @@ def search_funds(keyword: str, headless: bool = True) -> list[dict]:
     하기 위한 함수. 결과 각 항목의 href 가
     javascript:SelectedValueReturn('ISIN','펀드명') 형태라서 클릭 없이도
     ISIN 을 뽑을 수 있고, 표시용 펀드명은 innerText 를 쓴다.
+
+    exclude_etf=True (기본) 면 ETF 는 목록에서 제외한다 (_is_etf 참고).
     """
     log.info("펀드 검색 목록 조회: %s", keyword)
     with sync_playwright() as p:
@@ -277,7 +300,16 @@ def search_funds(keyword: str, headless: bool = True) -> list[dict]:
             frame = _open_fund_search_popup(page)
             frame.fill("#search_string", keyword)
             frame.click("#group149", timeout=5000)
-            time.sleep(1.0)
+            # 고정 sleep 만으로는 결과가 많을 때(예: "미래에셋" 2,240건) 로딩이
+            # 끝나기 전에 빈 목록을 읽는 경우가 있음(실측: 같은 검색어로 2,240건
+            # /0건 왔다갔다) - 첫 결과 행이 나타날 때까지 명시적으로 기다린다
+            try:
+                frame.wait_for_selector(
+                    "ul#isinList li > a[id$='_ISIN_ROW']", state="attached", timeout=10000
+                )
+            except PWTimeout:
+                log.info("검색 결과 행이 10초 내 나타나지 않음 - 결과 0건으로 처리")
+            time.sleep(0.5)
 
             results = frame.eval_on_selector_all(
                 "ul#isinList li > a[id$='_ISIN_ROW']",
@@ -291,6 +323,11 @@ def search_funds(keyword: str, headless: bool = True) -> list[dict]:
             browser.close()
 
     results = [r for r in results if r["name"]]
+    if exclude_etf:
+        before = len(results)
+        results = [r for r in results if not _is_etf(r["isin"], r["name"])]
+        if before != len(results):
+            log.info("ETF %d건 제외", before - len(results))
     log.info("검색 결과 %d건", len(results))
     return results
 

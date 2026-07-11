@@ -268,7 +268,7 @@ class App(tk.Tk):
                     self.search_list.insert("end", r["name"])
                 if results:
                     self.status_var.set(
-                        f"'{keyword}' 검색 결과 {len(results)}건 — 목록에서 펀드를 선택해 조회하세요."
+                        f"'{keyword}' 검색 결과 {len(results)}건 (ETF 제외) — 목록에서 펀드를 선택해 조회하세요."
                     )
                 else:
                     self.status_var.set(f"'{keyword}' 검색 결과가 없습니다. 다른 키워드로 검색해보세요.")

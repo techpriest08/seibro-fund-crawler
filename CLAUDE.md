@@ -156,6 +156,16 @@
       CREATE_NO_WINDOW 로 콘솔 번쩍임 방지, headless=False 개발용이면 전체
       chromium). 실측: 빈 PLAYWRIGHT_BROWSERS_PATH 에서 34초 만에 자동 설치
       후 검색 23건 성공. 실패 시 "인터넷 연결 확인" 한국어 RuntimeError
+- [x] **ETF 필터 + 대량 검색 결과 안정화** — "미래에셋 펀드만 안 뜬다" 신고의
+      원인: 검색 팝업에 ETF 도 같이 나오는데(실측: "미래에셋" 2,240건 중 287건이
+      TIGER ETF) ETF 는 분배내역 메뉴에 데이터가 없어 골라도 빈 결과만 나옴.
+      `_is_etf()` 판별(이름에 "상장지수"/"ETF", 또는 ISIN 이 KR7 시작 - 일반
+      공모펀드는 KRZ5 시작)로 `search_funds(exclude_etf=True 기본)` 에서 제외.
+      추가 안정화: ① 검색 후 고정 sleep(1초)만으로는 결과 수천 건일 때 로딩
+      전에 빈 목록을 읽는 경우 실측(같은 검색어로 2,240건/0건 왔다갔다) →
+      첫 결과 행(a[id$='_ISIN_ROW']) attached 를 명시적으로 대기(10초).
+      ② 팝업 결과 선택도 물리 클릭 → DOM click() 직접 호출로 변경, 대기
+      15초로 확대. 검증: 미래에셋 1,953건 중 맨 마지막 항목 선택 조회 성공
 - [ ] XML POST endpoint 및 payload 리버스 (DevTools Network 캡처)
 - [ ] 다수 펀드 배치 조회 (batch_crawl 함수는 있으나 여러 펀드로 실측 안 함)
 - [ ] 엑셀 연동 (기존 월지급식 펀드 비교 파일과 결합)
