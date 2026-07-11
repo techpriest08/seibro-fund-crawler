@@ -118,6 +118,20 @@
       후 실제 페이지 로드까지 실측 확인). 무인 설치(/VERYSILENT) → 설치된 exe
       실행 → 창 뜨는 것까지 검증 완료. 빌드법은 iss 파일 상단 주석 참고
       (ISCC.exe 는 winget install JRSoftware.InnoSetup 로 설치)
+- [x] **검색 결과 전체 목록 표시 + 사용자 선택 조회** — 기존 "첫 번째 결과
+      자동 선택" 방식을 폐기. `search_funds(keyword)` 신설: 검색 팝업에서
+      ul#isinList 의 a[id$='_ISIN_ROW'] href(javascript:SelectedValueReturn
+      ('ISIN','펀드명'))를 클릭 없이 파싱해 전체 목록 [{isin, name}] 반환
+      (실측: "월지급" → 153건). `_search_fund_in_popup()` 에 target_isin
+      파라미터 추가 — 검색은 키워드로 하되 선택은 `a[href*='{isin}']` 클릭으로
+      정확히 특정 (팝업 검색창에 ISIN 직접 입력은 미검증이라 안 씀). GUI는
+      왼쪽에 검색 결과 Listbox 를 두고 더블클릭/버튼으로 조회 시작
+- [x] **최근 검색 결과 저장/다시 보기** — 조회 완료 시 결과 텍스트를
+      `%LOCALAPPDATA%\SeibroFundViewer\history\*.json` (name/isin/queried_at/
+      text, 최신 30건 유지)으로 자동 저장. GUI 왼쪽 "최근 검색 결과" Listbox
+      에서 더블클릭하면 크롤링 없이 저장본을 "[최근 검색 결과] 펀드명 — 시각
+      조회 (저장본)" 헤더와 함께 바로 표시. GUI e2e (검색→2번째 항목 선택
+      조회→저장→다시 보기) 스크립트 구동으로 검증
 - [ ] XML POST endpoint 및 payload 리버스 (DevTools Network 캡처)
 - [ ] 다수 펀드 배치 조회 (batch_crawl 함수는 있으나 여러 펀드로 실측 안 함)
 - [ ] 엑셀 연동 (기존 월지급식 펀드 비교 파일과 결합)
@@ -129,9 +143,8 @@
 - [ ] **AUM 1년 조회가 오래 걸림** — 페이지네이션 250개 행 모으는 데 30초
       정도 걸림(GUI에서는 분배내역 조회까지 합쳐 1~2분). 매 페이지 전환마다
       `time.sleep` 대기가 있어서 그런데, 더 짧게 줄일 수 있는지 확인 필요
-- [ ] **GUI 실사용 테스트** — `src/gui_app.py`/exe 창이 뜨는 것과 백그라운드 크롤링
-      함수들이 개별적으로 동작하는 것은 확인했지만, 실제로 GUI에서 펀드명 입력
-      → 조회 버튼 클릭 → 결과 표시까지 사람이 눌러보는 e2e 테스트는 아직 안 함
+- [ ] **GUI 실사용 테스트** — 스크립트로 구동하는 e2e (검색→선택 조회→결과
+      표시→저장)는 통과했지만, 사람이 직접 exe 를 눌러보는 확인은 아직 안 함
 - [ ] **시각화** — 지금 GUI는 결과를 텍스트(표 형태 문자열)로만 보여줌. 분배
       이력 + AUM 변화 + 분배율을 그래프(예: matplotlib) 로 보여주는 것까지
       포함. 세부 UI는 착수 전 확인

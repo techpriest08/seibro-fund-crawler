@@ -82,7 +82,7 @@ FUND_NAV_URL = (
 class FundQuery:
     """조회 대상 펀드."""
     name: str                       # 펀드명 부분 검색어. 예: "이스트스프링 뱅크론"
-    isin: str | None = None         # 표준코드 (KR로 시작하는 12자리). 있으면 우선 사용.
+    isin: str | None = None         # 표준코드 (KR로 시작). 있으면 검색 결과 중 이 펀드를 정확히 선택.
 
 
 def _wait_websquare(page: Page, extra_sleep: float = 2.0) -> None:
@@ -113,9 +113,9 @@ def _open_fund_search_popup(page: Page):
     return frame
 
 
-def _search_fund_in_popup(frame, keyword: str) -> None:
+def _search_fund_in_popup(frame, keyword: str, target_isin: str | None = None) -> None:
     """
-    검색 팝업 iframe 내부에서 펀드명 검색.
+    검색 팝업 iframe 내부에서 펀드명 검색 후 결과 선택.
 
     확정된 구조:
     - 검색창: input#search_string, 검색 버튼: a#group149
@@ -125,13 +125,64 @@ def _search_fund_in_popup(frame, keyword: str) -> None:
     - 클릭하면 메인 페이지의 input#KOR_SECN_NM / input#KOR_SECN_CD 에 값이
       채워지고 팝업이 자동으로 닫힘 ("뱅크론" 검색 → 23건 → 첫 결과 클릭 →
       KOR_SECN_CD=KRZ501889310 로 채워짐을 실측 확인).
+
+    target_isin 이 주어지면 첫 번째 결과 대신 href 에 해당 ISIN 이 들어 있는
+    결과를 클릭한다 (GUI에서 검색 결과 목록 중 사용자가 고른 펀드를 정확히
+    선택하기 위함). 팝업 검색창에 ISIN 을 직접 넣는 방식은 동작이 검증된 적이
+    없어서, 검색은 항상 펀드명 키워드로 하고 선택만 ISIN 으로 특정한다.
     """
     frame.fill("#search_string", keyword)
     frame.click("#group149", timeout=5000)
     time.sleep(1.0)
 
-    frame.click("ul#isinList li:first-child a", timeout=5000)
+    if target_isin:
+        frame.click(f"ul#isinList a[href*='{target_isin}']", timeout=5000)
+    else:
+        frame.click("ul#isinList li:first-child a", timeout=5000)
     time.sleep(1)
+
+
+def search_funds(keyword: str, headless: bool = True) -> list[dict]:
+    """
+    검색 팝업에서 keyword 로 펀드를 검색하고, 아무것도 선택하지 않은 채
+    전체 결과 목록을 [{"isin": ..., "name": ...}, ...] 로 반환한다.
+
+    GUI에서 "첫 번째 결과 자동 선택" 대신 사용자가 목록을 보고 직접 고르게
+    하기 위한 함수. 결과 각 항목의 href 가
+    javascript:SelectedValueReturn('ISIN','펀드명') 형태라서 클릭 없이도
+    ISIN 을 뽑을 수 있고, 표시용 펀드명은 innerText 를 쓴다.
+    """
+    log.info("펀드 검색 목록 조회: %s", keyword)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            locale="ko-KR",
+        )
+        page = context.new_page()
+        try:
+            page.goto(SEIBRO_URL, wait_until="domcontentloaded")
+            _wait_websquare(page)
+
+            frame = _open_fund_search_popup(page)
+            frame.fill("#search_string", keyword)
+            frame.click("#group149", timeout=5000)
+            time.sleep(1.0)
+
+            results = frame.eval_on_selector_all(
+                "ul#isinList li > a[id$='_ISIN_ROW']",
+                "els => els.map(el => {"
+                "  const href = el.getAttribute('href') || '';"
+                "  const m = href.match(/SelectedValueReturn\\(\\s*['\\\"]([^'\\\"]*)['\\\"]/);"
+                "  return {isin: m ? m[1] : '', name: (el.innerText || '').trim()};"
+                "})",
+            )
+        finally:
+            browser.close()
+
+    results = [r for r in results if r["name"]]
+    log.info("검색 결과 %d건", len(results))
+    return results
 
 
 def _get_selected_fund_name(page: Page) -> str:
@@ -325,9 +376,9 @@ def crawl_fund_distribution(
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "01_landing.png")
 
-            # 2) 펀드 검색 팝업 열고 선택
+            # 2) 펀드 검색 팝업 열고 선택 (isin 이 있으면 그 펀드를 정확히 선택)
             popup = _open_fund_search_popup(page)
-            _search_fund_in_popup(popup, fund.isin or fund.name)
+            _search_fund_in_popup(popup, fund.name, target_isin=fund.isin)
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "02_after_select.png")
 
@@ -504,7 +555,7 @@ def crawl_fund_nav_history(
             _wait_websquare(page)
 
             frame = _open_nav_search_popup(page)
-            _search_fund_in_popup(frame, fund.isin or fund.name)
+            _search_fund_in_popup(frame, fund.name, target_isin=fund.isin)
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "nav_01_selected.png")
 

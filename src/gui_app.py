@@ -2,15 +2,23 @@
 SEIBro 펀드 분배금/AUM 조회 GUI.
 
 exe로 더블클릭 실행하면 새 창이 뜨는 형태를 목표로 만든 Tkinter 프론트엔드.
-크롤링 로직 자체는 seibro_fund_distribution.py 그대로 재사용하고, 여기서는
-펀드명 입력창 + 조회 버튼 + 결과 표시만 담당한다. 브라우저는 headless=True 로
-띄워서 사용자에게는 이 앱 창 하나만 보이게 한다.
+크롤링 로직 자체는 seibro_fund_distribution.py 그대로 재사용한다.
+
+동작 흐름 (첫 결과 자동 선택 방식에서 변경):
+1. 펀드명 키워드 입력 → [펀드 검색] → 검색 결과 "전체 목록"을 왼쪽에 표시
+2. 목록에서 원하는 펀드를 골라 [선택한 펀드 조회] (또는 더블클릭) → 크롤링 시작
+3. 조회가 끝난 결과는 %LOCALAPPDATA%/SeibroFundViewer/history 에 자동 저장되고,
+   왼쪽 "최근 검색 결과" 목록에서 더블클릭하면 크롤링 없이 바로 다시 볼 수 있다
 """
 from __future__ import annotations
 
+import json
+import os
 import queue
 import threading
 import tkinter as tk
+from datetime import datetime
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 import pandas as pd
@@ -20,11 +28,50 @@ from seibro_fund_distribution import (
     FundQuery,
     crawl_fund_distribution,
     crawl_fund_nav_history,
+    search_funds,
     summarize_aum_change_on_distribution,
     summarize_aum_vs_distribution,
     summarize_distribution_yield,
     summarize_price_change,
 )
+
+# 조회 결과 저장 위치. exe/스크립트 어느 쪽으로 실행해도 같은 곳을 보도록
+# 사용자 프로필 하위 고정 경로를 쓴다 (Playwright 브라우저 경로와 같은 방식).
+HISTORY_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SeibroFundViewer" / "history"
+HISTORY_LIMIT = 30  # 이 개수를 넘으면 오래된 결과부터 삭제
+
+
+def _load_history() -> list[dict]:
+    """저장된 조회 결과 목록을 최신순으로 반환. 깨진 파일은 조용히 건너뛴다."""
+    if not HISTORY_DIR.exists():
+        return []
+    items: list[dict] = []
+    for f in sorted(HISTORY_DIR.glob("*.json"), reverse=True):
+        try:
+            items.append(json.loads(f.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return items
+
+
+def _save_history_entry(name: str, isin: str, text: str) -> None:
+    """조회 결과 1건을 저장하고, HISTORY_LIMIT 초과분은 오래된 것부터 지운다."""
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now()
+    entry = {
+        "name": name,
+        "isin": isin,
+        "queried_at": f"{ts:%Y-%m-%d %H:%M}",
+        "text": text,
+    }
+    (HISTORY_DIR / f"{ts:%Y%m%d_%H%M%S_%f}.json").write_text(
+        json.dumps(entry, ensure_ascii=False), encoding="utf-8"
+    )
+    for old in sorted(HISTORY_DIR.glob("*.json"), reverse=True)[HISTORY_LIMIT:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
 
 def _condense_table(df: pd.DataFrame, head: int = 5, tail: int = 5) -> str:
@@ -48,24 +95,65 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("세이브로 펀드 분배금 조회")
-        self.geometry("950x650")
+        self.geometry("1250x700")
 
+        # --- 상단: 검색어 입력 ---
         top = ttk.Frame(self, padding=10)
         top.pack(fill="x")
         ttk.Label(top, text="펀드명:").pack(side="left")
         self.name_var = tk.StringVar()
         entry = ttk.Entry(top, textvariable=self.name_var, width=45)
         entry.pack(side="left", padx=5)
-        entry.bind("<Return>", lambda _e: self.on_query())
-        self.query_btn = ttk.Button(top, text="조회", command=self.on_query)
-        self.query_btn.pack(side="left", padx=5)
+        entry.bind("<Return>", lambda _e: self.on_search())
+        self.search_btn = ttk.Button(top, text="펀드 검색", command=self.on_search)
+        self.search_btn.pack(side="left", padx=5)
 
-        self.status_var = tk.StringVar(value="펀드명을 입력하고 조회를 누르세요.")
+        self.status_var = tk.StringVar(value="펀드명을 입력하고 [펀드 검색]을 누르세요.")
         ttk.Label(self, textvariable=self.status_var, padding=(10, 0)).pack(anchor="w")
 
+        # --- 본문: 왼쪽 목록 패널 + 오른쪽 결과 텍스트 ---
+        body = ttk.Frame(self, padding=10)
+        body.pack(fill="both", expand=True)
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+
+        left = ttk.Frame(body, width=400)
+        left.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        left.rowconfigure(0, weight=3)
+        left.rowconfigure(1, weight=2)
+        left.columnconfigure(0, weight=1)
+
+        # 검색 결과 전체 목록 (여기서 골라서 조회)
+        search_box = ttk.Labelframe(left, text="펀드 검색 결과 (더블클릭으로 조회)", padding=5)
+        search_box.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        search_box.rowconfigure(0, weight=1)
+        search_box.columnconfigure(0, weight=1)
+
+        self.search_list = tk.Listbox(search_box, exportselection=False)
+        s_scroll = ttk.Scrollbar(search_box, orient="vertical", command=self.search_list.yview)
+        self.search_list.configure(yscrollcommand=s_scroll.set)
+        self.search_list.grid(row=0, column=0, sticky="nsew")
+        s_scroll.grid(row=0, column=1, sticky="ns")
+        self.search_list.bind("<Double-Button-1>", lambda _e: self.on_fetch())
+        self.fetch_btn = ttk.Button(search_box, text="선택한 펀드 조회", command=self.on_fetch)
+        self.fetch_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+
+        # 최근 검색 결과 (저장본 다시 보기 - 크롤링 안 함)
+        history_box = ttk.Labelframe(left, text="최근 검색 결과 (더블클릭으로 다시 보기)", padding=5)
+        history_box.grid(row=1, column=0, sticky="nsew")
+        history_box.rowconfigure(0, weight=1)
+        history_box.columnconfigure(0, weight=1)
+
+        self.history_list = tk.Listbox(history_box, exportselection=False)
+        h_scroll = ttk.Scrollbar(history_box, orient="vertical", command=self.history_list.yview)
+        self.history_list.configure(yscrollcommand=h_scroll.set)
+        self.history_list.grid(row=0, column=0, sticky="nsew")
+        h_scroll.grid(row=0, column=1, sticky="ns")
+        self.history_list.bind("<Double-Button-1>", lambda _e: self.on_show_history())
+
         # 결과 표가 넓고 길어서 창을 키워도 다 안 보일 수 있음 - 세로/가로 스크롤 둘 다 추가
-        text_frame = ttk.Frame(self, padding=10)
-        text_frame.pack(fill="both", expand=True)
+        text_frame = ttk.Frame(body)
+        text_frame.grid(row=0, column=1, sticky="nsew")
         text_frame.rowconfigure(0, weight=1)
         text_frame.columnconfigure(0, weight=1)
 
@@ -78,22 +166,52 @@ class App(tk.Tk):
         y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll.grid(row=1, column=0, sticky="ew")
 
+        self._search_results: list[dict] = []   # [{"isin", "name"}, ...]
+        self._history: list[dict] = []
         self._result_queue: queue.Queue = queue.Queue()
+        self._refresh_history_list()
         self.after(200, self._poll_queue)
 
-    def on_query(self) -> None:
-        name = self.name_var.get().strip()
-        if not name:
+    # ----- 검색 (전체 목록 가져오기) -----
+
+    def on_search(self) -> None:
+        keyword = self.name_var.get().strip()
+        if not keyword:
             messagebox.showwarning("입력 필요", "펀드명을 입력하세요.")
             return
-        self.query_btn.config(state="disabled")
-        self.status_var.set(f"'{name}' 조회 중... (AUM 1년치까지 모으느라 1~2분 걸릴 수 있습니다)")
-        self.text.delete("1.0", "end")
-        threading.Thread(target=self._run_query, args=(name,), daemon=True).start()
+        self._set_busy(True)
+        self.status_var.set(f"'{keyword}' 검색 중... (10초 정도 걸립니다)")
+        threading.Thread(target=self._run_search, args=(keyword,), daemon=True).start()
 
-    def _run_query(self, name: str) -> None:
+    def _run_search(self, keyword: str) -> None:
         try:
-            fund = FundQuery(name=name)
+            results = search_funds(keyword, headless=True)
+            self._result_queue.put(("search_ok", keyword, results))
+        except Exception as e:  # noqa: BLE001 - 백그라운드 스레드 예외를 GUI로 전달
+            self._result_queue.put(("error", str(e)))
+
+    # ----- 조회 (목록에서 고른 펀드 크롤링) -----
+
+    def on_fetch(self) -> None:
+        selection = self.search_list.curselection()
+        if not selection:
+            messagebox.showwarning("선택 필요", "검색 결과 목록에서 펀드를 먼저 선택하세요.")
+            return
+        target = self._search_results[selection[0]]
+        # Tkinter 위젯은 메인 스레드에서만 만져야 함("main thread is not in main
+        # loop" 오류 실측) - 키워드를 여기서 읽어서 워커 스레드에 값으로 넘긴다
+        keyword = self.name_var.get().strip() or target["name"]
+        self._set_busy(True)
+        self.status_var.set(
+            f"'{target['name']}' 조회 중... (AUM 1년치까지 모으느라 1~2분 걸릴 수 있습니다)"
+        )
+        self.text.delete("1.0", "end")
+        threading.Thread(target=self._run_query, args=(target, keyword), daemon=True).start()
+
+    def _run_query(self, target: dict, keyword: str) -> None:
+        try:
+            # 검색은 사용자가 입력한 키워드로 하되, 선택은 ISIN 으로 정확히 특정
+            fund = FundQuery(name=keyword, isin=target["isin"])
             dist_df = crawl_fund_distribution(fund, period="1년", headless=True)
             yield_summary = summarize_distribution_yield(dist_df)
             nav_df = crawl_fund_nav_history(fund, period="1년", headless=True)
@@ -101,10 +219,35 @@ class App(tk.Tk):
             vs_dist_summary = summarize_aum_vs_distribution(dist_df, aum_summary)
             price_summary = summarize_price_change(nav_df)
             self._result_queue.put(
-                ("ok", dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary)
+                ("ok", target, dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary)
             )
         except Exception as e:  # noqa: BLE001 - 백그라운드 스레드 예외를 GUI로 전달
             self._result_queue.put(("error", str(e)))
+
+    # ----- 최근 검색 결과 다시 보기 -----
+
+    def on_show_history(self) -> None:
+        selection = self.history_list.curselection()
+        if not selection:
+            return
+        entry = self._history[selection[0]]
+        header = f"[최근 검색 결과] {entry['name']} — {entry['queried_at']} 조회 (저장본)"
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", f"{header}\n{'=' * len(header)}\n\n{entry['text']}")
+        self.status_var.set(f"저장된 결과 표시: {entry['name']} ({entry['queried_at']})")
+
+    def _refresh_history_list(self) -> None:
+        self._history = _load_history()
+        self.history_list.delete(0, "end")
+        for entry in self._history:
+            self.history_list.insert("end", f"[{entry['queried_at']}] {entry['name']}")
+
+    # ----- 공통 -----
+
+    def _set_busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        self.search_btn.config(state=state)
+        self.fetch_btn.config(state=state)
 
     def _poll_queue(self) -> None:
         try:
@@ -112,33 +255,46 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         else:
-            self.query_btn.config(state="normal")
-            if item[0] == "error":
+            self._set_busy(False)
+            kind = item[0]
+            if kind == "error":
                 self.status_var.set("오류 발생")
                 messagebox.showerror("오류", item[1])
-            else:
-                _, dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary = item
-                matched_name = self._extract_matched_name(dist_df, nav_df)
-                self.status_var.set(f"조회 완료: {matched_name}" if matched_name else "조회 완료")
-                self._render_results(
+            elif kind == "search_ok":
+                _, keyword, results = item
+                self._search_results = results
+                self.search_list.delete(0, "end")
+                for r in results:
+                    self.search_list.insert("end", r["name"])
+                if results:
+                    self.status_var.set(
+                        f"'{keyword}' 검색 결과 {len(results)}건 — 목록에서 펀드를 선택해 조회하세요."
+                    )
+                else:
+                    self.status_var.set(f"'{keyword}' 검색 결과가 없습니다. 다른 키워드로 검색해보세요.")
+            else:  # "ok" - 조회 완료
+                _, target, dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary = item
+                matched_name = self._extract_matched_name(dist_df, nav_df) or target["name"]
+                result_text = self._build_result_text(
                     dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary, matched_name
                 )
+                self.text.delete("1.0", "end")
+                self.text.insert("1.0", result_text)
+                self.status_var.set(f"조회 완료: {matched_name} (결과가 '최근 검색 결과'에 저장됨)")
+                _save_history_entry(matched_name, target["isin"], result_text)
+                self._refresh_history_list()
         self.after(200, self._poll_queue)
 
     @staticmethod
     def _extract_matched_name(dist_df: pd.DataFrame, nav_df: pd.DataFrame) -> str:
-        """
-        펀드명은 부분 검색이라 검색어와 실제로 조회된 펀드가 다를 수 있다
-        (예: "월지급"으로 검색하면 그 중 첫 번째 결과가 선택됨). crawl 함수들이
-        결과 DataFrame 맨 앞에 넣어주는 "조회된펀드명" 컬럼에서 실제 펀드명을 뽑는다.
-        """
+        """crawl 함수들이 결과 맨 앞에 넣어주는 "조회된펀드명" 컬럼에서 실제 펀드명을 뽑는다."""
         for df in (dist_df, nav_df):
             if not df.empty and "조회된펀드명" in df.columns:
                 return str(df["조회된펀드명"].iloc[0])
         return ""
 
-    def _render_results(
-        self,
+    @staticmethod
+    def _build_result_text(
         dist_df: pd.DataFrame,
         yield_summary: dict,
         nav_df: pd.DataFrame,
@@ -146,7 +302,7 @@ class App(tk.Tk):
         vs_dist_summary: dict,
         price_summary: dict,
         matched_name: str,
-    ) -> None:
+    ) -> str:
         # 표 안에도 "조회된펀드명" 컬럼이 매 행마다 반복되면 지저분하니, 맨 위
         # 한 줄에만 펀드명을 남기고 표에서는 그 컬럼을 뺀다.
         dist_display = dist_df.drop(columns=["조회된펀드명"], errors="ignore")
@@ -218,7 +374,7 @@ class App(tk.Tk):
         lines.append("--- 기준가 / 순자산 / 설정액 일별 원자료 (앞뒤 일부만 표시) ---")
         lines.append(_condense_table(nav_display, head=5, tail=5))
 
-        self.text.insert("1.0", "\n".join(lines))
+        return "\n".join(lines)
 
 
 if __name__ == "__main__":
