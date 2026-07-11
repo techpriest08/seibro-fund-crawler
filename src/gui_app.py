@@ -9,6 +9,11 @@ exe로 더블클릭 실행하면 새 창이 뜨는 형태를 목표로 만든 Tk
 2. 목록에서 원하는 펀드를 골라 [선택한 펀드 조회] (또는 더블클릭) → 크롤링 시작
 3. 조회가 끝난 결과는 %LOCALAPPDATA%/SeibroFundViewer/history 에 자동 저장되고,
    왼쪽 "최근 검색 결과" 목록에서 더블클릭하면 크롤링 없이 바로 다시 볼 수 있다
+   - 펀드(ISIN)당 1건씩 영구 보관: 같은 펀드를 다시 조회하기 전까지 계속 남고,
+     다시 조회하면 그 펀드의 저장본만 새 내용으로 갱신된다
+4. 조회할 때마다 핵심 수치(분배율, 순자산 변화 등)를 요약 엑셀
+   (%LOCALAPPDATA%/SeibroFundViewer/펀드조회요약.xlsx)로 자동 갱신하고,
+   [요약 엑셀 열기] 버튼으로 바로 열 수 있다 (여러 펀드 비교용)
 """
 from __future__ import annotations
 
@@ -37,25 +42,45 @@ from seibro_fund_distribution import (
 
 # 조회 결과 저장 위치. exe/스크립트 어느 쪽으로 실행해도 같은 곳을 보도록
 # 사용자 프로필 하위 고정 경로를 쓴다 (Playwright 브라우저 경로와 같은 방식).
-HISTORY_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SeibroFundViewer" / "history"
-HISTORY_LIMIT = 30  # 이 개수를 넘으면 오래된 결과부터 삭제
+_APP_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SeibroFundViewer"
+HISTORY_DIR = _APP_DIR / "history"
+SUMMARY_XLSX = _APP_DIR / "펀드조회요약.xlsx"
 
 
 def _load_history() -> list[dict]:
-    """저장된 조회 결과 목록을 최신순으로 반환. 깨진 파일은 조용히 건너뛴다."""
+    """
+    저장된 조회 결과 목록을 최신순으로 반환. 깨진 파일은 조용히 건너뛴다.
+
+    같은 펀드(ISIN)가 여러 파일로 남아 있으면(예전 시각 기반 파일명 시절의
+    잔재) 가장 최근 것만 남긴다 - 화면에는 펀드당 1건씩만 보이게.
+    """
     if not HISTORY_DIR.exists():
         return []
     items: list[dict] = []
-    for f in sorted(HISTORY_DIR.glob("*.json"), reverse=True):
+    for f in HISTORY_DIR.glob("*.json"):
         try:
             items.append(json.loads(f.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, OSError):
             continue
-    return items
+    items.sort(key=lambda e: e.get("queried_at", ""), reverse=True)
+    seen_isin: set[str] = set()
+    deduped: list[dict] = []
+    for e in items:
+        isin = e.get("isin", "")
+        if isin and isin in seen_isin:
+            continue
+        if isin:
+            seen_isin.add(isin)
+        deduped.append(e)
+    return deduped
 
 
-def _save_history_entry(name: str, isin: str, text: str) -> None:
-    """조회 결과 1건을 저장하고, HISTORY_LIMIT 초과분은 오래된 것부터 지운다."""
+def _save_history_entry(name: str, isin: str, text: str, summary: dict | None = None) -> None:
+    """
+    조회 결과 1건 저장. 펀드(ISIN)당 파일 1개를 유지한다: 파일명을 ISIN 으로
+    쓰므로 같은 펀드를 다시 조회하면 덮어써져 갱신되고, 다른 펀드의 저장본은
+    사용자가 다시 조회하기 전까지 삭제 없이 계속 남는다 (개수 제한 없음).
+    """
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now()
     entry = {
@@ -63,15 +88,66 @@ def _save_history_entry(name: str, isin: str, text: str) -> None:
         "isin": isin,
         "queried_at": f"{ts:%Y-%m-%d %H:%M}",
         "text": text,
+        "summary": summary or {},
     }
-    (HISTORY_DIR / f"{ts:%Y%m%d_%H%M%S_%f}.json").write_text(
+    key = isin or f"{ts:%Y%m%d_%H%M%S_%f}"
+    (HISTORY_DIR / f"{key}.json").write_text(
         json.dumps(entry, ensure_ascii=False), encoding="utf-8"
     )
-    for old in sorted(HISTORY_DIR.glob("*.json"), reverse=True)[HISTORY_LIMIT:]:
-        try:
-            old.unlink()
-        except OSError:
-            pass
+    # 예전 시각 기반 파일명으로 남은 같은 펀드의 옛 저장본 정리
+    if isin:
+        for f in HISTORY_DIR.glob("*.json"):
+            if f.stem == key:
+                continue
+            try:
+                if json.loads(f.read_text(encoding="utf-8")).get("isin") == isin:
+                    f.unlink()
+            except (json.JSONDecodeError, OSError):
+                continue
+
+
+# 요약 엑셀 컬럼: (표시할 컬럼명, summary dict 의 key)
+_XLSX_COLUMNS = [
+    ("분배횟수(1년)", "분배횟수"),
+    ("평균기준가", "평균기준가"),
+    ("1000좌당분배금_세전(원)", "분배금합계_세전"),
+    ("1000좌당분배금_세후(원)", "분배금합계_세후"),
+    ("분배율_세전(%)", "분배율_세전"),
+    ("분배율_세후(%)", "분배율_세후"),
+    ("기준가_1년전(원)", "기준가_시작"),
+    ("기준가_현재(원)", "기준가_종료"),
+    ("기준가변화(%)", "기준가변화_pct"),
+    ("순자산_1년전(억원)", "순자산_시작"),
+    ("순자산_현재(억원)", "순자산_종료"),
+    ("순자산변화(%)", "순자산변화_pct"),
+    ("총분배유출(억원)", "총분배유출"),
+    ("분배제외_운용손익(억원)", "운용손익_분배제외"),
+    ("분배제외_운용손익(%)", "운용손익_분배제외_pct"),
+]
+
+
+def _export_history_excel(history: list[dict]) -> str | None:
+    """
+    저장된 조회 결과들의 핵심 수치를 요약 엑셀 한 장으로 내보낸다 (펀드당 1행,
+    여러 월지급식 펀드 비교용). 매 조회 후 자동 호출되어 항상 최신 상태 유지.
+    반환: 실패 사유 문자열 (성공하면 None). 엑셀에서 파일을 열어둔 채면
+    PermissionError 가 나는데, 그 경우 다음 조회 때 다시 갱신되므로 치명적이지 않다.
+    """
+    rows = []
+    for e in history:
+        s = e.get("summary") or {}
+        row = {"조회일시": e.get("queried_at", ""), "펀드명": e.get("name", ""), "ISIN": e.get("isin", "")}
+        for col, key in _XLSX_COLUMNS:
+            row[col] = s.get(key)
+        rows.append(row)
+    if not rows:
+        return "저장된 조회 결과가 없습니다"
+    _APP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        pd.DataFrame(rows).to_excel(SUMMARY_XLSX, index=False)
+    except PermissionError:
+        return "요약 엑셀이 열려 있어 갱신하지 못했습니다 (엑셀을 닫고 다시 조회하면 갱신됩니다)"
+    return None
 
 
 def _condense_table(df: pd.DataFrame, head: int = 5, tail: int = 5) -> str:
@@ -130,13 +206,15 @@ class App(tk.Tk):
         search_box.columnconfigure(0, weight=1)
 
         self.search_list = tk.Listbox(search_box, exportselection=False)
-        s_scroll = ttk.Scrollbar(search_box, orient="vertical", command=self.search_list.yview)
-        self.search_list.configure(yscrollcommand=s_scroll.set)
+        s_y = ttk.Scrollbar(search_box, orient="vertical", command=self.search_list.yview)
+        s_x = ttk.Scrollbar(search_box, orient="horizontal", command=self.search_list.xview)
+        self.search_list.configure(yscrollcommand=s_y.set, xscrollcommand=s_x.set)
         self.search_list.grid(row=0, column=0, sticky="nsew")
-        s_scroll.grid(row=0, column=1, sticky="ns")
+        s_y.grid(row=0, column=1, sticky="ns")
+        s_x.grid(row=1, column=0, sticky="ew")
         self.search_list.bind("<Double-Button-1>", lambda _e: self.on_fetch())
         self.fetch_btn = ttk.Button(search_box, text="선택한 펀드 조회", command=self.on_fetch)
-        self.fetch_btn.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        self.fetch_btn.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
 
         # 최근 검색 결과 (저장본 다시 보기 - 크롤링 안 함)
         history_box = ttk.Labelframe(left, text="최근 검색 결과 (더블클릭으로 다시 보기)", padding=5)
@@ -145,11 +223,16 @@ class App(tk.Tk):
         history_box.columnconfigure(0, weight=1)
 
         self.history_list = tk.Listbox(history_box, exportselection=False)
-        h_scroll = ttk.Scrollbar(history_box, orient="vertical", command=self.history_list.yview)
-        self.history_list.configure(yscrollcommand=h_scroll.set)
+        h_y = ttk.Scrollbar(history_box, orient="vertical", command=self.history_list.yview)
+        h_x = ttk.Scrollbar(history_box, orient="horizontal", command=self.history_list.xview)
+        self.history_list.configure(yscrollcommand=h_y.set, xscrollcommand=h_x.set)
         self.history_list.grid(row=0, column=0, sticky="nsew")
-        h_scroll.grid(row=0, column=1, sticky="ns")
+        h_y.grid(row=0, column=1, sticky="ns")
+        h_x.grid(row=1, column=0, sticky="ew")
         self.history_list.bind("<Double-Button-1>", lambda _e: self.on_show_history())
+        ttk.Button(history_box, text="요약 엑셀 열기 (펀드 비교표)", command=self.on_open_excel).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0)
+        )
 
         # 결과 표가 넓고 길어서 창을 키워도 다 안 보일 수 있음 - 세로/가로 스크롤 둘 다 추가
         text_frame = ttk.Frame(body)
@@ -242,6 +325,16 @@ class App(tk.Tk):
         for entry in self._history:
             self.history_list.insert("end", f"[{entry['queried_at']}] {entry['name']}")
 
+    def on_open_excel(self) -> None:
+        """요약 엑셀을 최신 상태로 갱신한 뒤 연다."""
+        err = _export_history_excel(self._history)
+        if err and not SUMMARY_XLSX.exists():
+            messagebox.showwarning("요약 엑셀", err)
+            return
+        if err:
+            self.status_var.set(err)
+        os.startfile(SUMMARY_XLSX)
+
     # ----- 공통 -----
 
     def _set_busy(self, busy: bool) -> None:
@@ -280,10 +373,38 @@ class App(tk.Tk):
                 )
                 self.text.delete("1.0", "end")
                 self.text.insert("1.0", result_text)
-                self.status_var.set(f"조회 완료: {matched_name} (결과가 '최근 검색 결과'에 저장됨)")
-                _save_history_entry(matched_name, target["isin"], result_text)
+                summary = self._build_summary(yield_summary, price_summary, aum_summary, vs_dist_summary)
+                _save_history_entry(matched_name, target["isin"], result_text, summary)
                 self._refresh_history_list()
+                xlsx_err = _export_history_excel(self._history)
+                status = f"조회 완료: {matched_name} (결과가 '최근 검색 결과'에 저장됨)"
+                if xlsx_err:
+                    status += f" / {xlsx_err}"
+                self.status_var.set(status)
         self.after(200, self._poll_queue)
+
+    @staticmethod
+    def _build_summary(
+        yield_summary: dict, price_summary: dict, aum_summary: dict, vs_dist_summary: dict
+    ) -> dict:
+        """요약 엑셀 한 행에 들어갈 핵심 수치 모음 (컬럼 매핑은 _XLSX_COLUMNS 참고)."""
+        return {
+            "분배횟수": yield_summary["count"],
+            "평균기준가": yield_summary["avg_price"],
+            "분배금합계_세전": yield_summary["total_dist_per_1000_pretax"],
+            "분배금합계_세후": yield_summary["total_dist_per_1000_posttax"],
+            "분배율_세전": yield_summary["ratio_pct_pretax"],
+            "분배율_세후": yield_summary["ratio_pct_posttax"],
+            "기준가_시작": price_summary["start_price"],
+            "기준가_종료": price_summary["end_price"],
+            "기준가변화_pct": price_summary["change_pct"],
+            "순자산_시작": aum_summary["period_start_aum_억원"],
+            "순자산_종료": aum_summary["period_end_aum_억원"],
+            "순자산변화_pct": aum_summary["period_aum_change_pct"],
+            "총분배유출": vs_dist_summary["total_distributed_억원"],
+            "운용손익_분배제외": vs_dist_summary["aum_change_excl_distribution_억원"],
+            "운용손익_분배제외_pct": vs_dist_summary["aum_change_excl_distribution_pct"],
+        }
 
     @staticmethod
     def _extract_matched_name(dist_df: pd.DataFrame, nav_df: pd.DataFrame) -> str:
