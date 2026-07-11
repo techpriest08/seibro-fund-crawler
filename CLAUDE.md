@@ -5,6 +5,8 @@
 - 주력 언어: 한국어 반말, 간결/직접적 소통 선호
 - 답변 시 이름 부르지 말 것
 - 되묻지 말고 바로 진행. 애매하면 가정을 명시하고 진행
+- **수정 작업이 완료되면 묻지 말고 무조건 커밋 + GitHub 푸시** (사용자가 집/
+  다른 컴퓨터 두 대를 오가며 작업하므로 푸시 누락 시 이어서 작업 불가)
 
 ## 프로젝트 목적
 한국 판매 월지급식 채권 펀드 (뱅크론, 하이일드 위주) 리서치용
@@ -106,6 +108,16 @@
       GUI에 다 나열하지 않고 앞/뒤 5행만 보여주도록 축약(`_condense_table()`,
       컬럼 정렬 깨지지 않게 전체를 한 번에 to_string() 한 뒤 줄 단위로 자름).
       분배일별 AUM 변화 상세는 (짧아서) 계속 전체 표시
+- [x] **setup.exe 설치 프로그램 (완전 독립형 배포 해결)** — Inno Setup 6 기반
+      `installer/SeibroFundViewer.iss` 작성. `dist/SeibroFundViewer_Setup.exe`
+      (약 153MB) 하나만 받아 실행하면 ① 프로그램 본체(`%LOCALAPPDATA%\Programs\
+      SeibroFundViewer`, 관리자 권한 불필요) ② Playwright Chromium까지 전부
+      설치됨. **핵심 발견**: GUI는 headless=True 로만 브라우저를 쓰므로 전체
+      Chromium(415MB) 대신 chromium_headless_shell(269MB)+winldd 만 번들해도
+      동작함 (격리 폴더에 headless shell만 두고 PLAYWRIGHT_BROWSERS_PATH 지정
+      후 실제 페이지 로드까지 실측 확인). 무인 설치(/VERYSILENT) → 설치된 exe
+      실행 → 창 뜨는 것까지 검증 완료. 빌드법은 iss 파일 상단 주석 참고
+      (ISCC.exe 는 winget install JRSoftware.InnoSetup 로 설치)
 - [ ] XML POST endpoint 및 payload 리버스 (DevTools Network 캡처)
 - [ ] 다수 펀드 배치 조회 (batch_crawl 함수는 있으나 여러 펀드로 실측 안 함)
 - [ ] 엑셀 연동 (기존 월지급식 펀드 비교 파일과 결합)
@@ -114,10 +126,6 @@
 - [ ] **월평균 기준가 대비 분배율** — 조회기간이 1년 미만인 신생 펀드는
       1년 데이터가 없으니, 보유 기간의 월평균 기준가 대비 분배율로 대체
       계산하는 로직 추가
-- [ ] **exe 완전 독립형으로 개선** — 지금은 Chromium 이 로컬에 미리 설치돼
-      있어야 동작함. exe 최초 실행 시 Chromium 자동 설치(`playwright install
-      chromium` subprocess 호출) 하거나, 빌드 시 Chromium 폴더를 통째로
-      같이 묶는 방식 검토
 - [ ] **AUM 1년 조회가 오래 걸림** — 페이지네이션 250개 행 모으는 데 30초
       정도 걸림(GUI에서는 분배내역 조회까지 합쳐 1~2분). 매 페이지 전환마다
       `time.sleep` 대기가 있어서 그런데, 더 짧게 줄일 수 있는지 확인 필요
