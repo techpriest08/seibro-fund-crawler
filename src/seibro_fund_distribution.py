@@ -86,9 +86,64 @@ class FundQuery:
 
 
 def _wait_websquare(page: Page, extra_sleep: float = 2.0) -> None:
-    """WebSquare 초기화 대기. networkidle 만으로는 부족한 경우가 많음."""
-    page.wait_for_load_state("networkidle", timeout=15000)
+    """
+    WebSquare 초기화 대기. networkidle 만으로는 부족한 경우가 많음.
+
+    실측(뱅크론 조회): 사이트가 느린 시간대에는 networkidle 이 15초 안에 안
+    와서 여기서 조회 전체가 죽는 경우가 있었다. networkidle 미도달이 곧
+    "페이지를 못 쓴다"는 뜻은 아니므로(백그라운드 요청이 계속 도는 것뿐일 수
+    있음) 타임아웃이면 경고만 남기고 여유 시간을 더 준 뒤 그대로 진행한다.
+    """
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PWTimeout:
+        log.warning("networkidle 15초 초과 - 3초 더 기다린 후 그대로 진행")
+        time.sleep(3)
     time.sleep(extra_sleep)
+
+
+def _goto_with_retry(page: Page, url: str, ready_selector: str, retries: int = 2) -> None:
+    """
+    세이브로 페이지 접속 + 오류 페이지 감지 시 재시도.
+
+    실측(2026-07-11 22시경): 세이브로가 간헐적으로/시간대에 따라
+    "한국예탁결제원 홈페이지 Error 안내 - 요청하신 페이지를 표시할 수 없습니다"
+    페이지를 반환한다. 이때 조용히 빈 결과를 내면 사용자는 "펀드에 데이터가
+    없나 보다"로 오해하므로, 준비 요소(ready_selector)가 없으면 재시도 후
+    그래도 안 되면 명확한 한국어 메시지로 실패시킨다.
+    """
+    for attempt in range(retries + 1):
+        page.goto(url, wait_until="domcontentloaded")
+        try:
+            _wait_websquare(page)
+        except PWTimeout:
+            pass  # 오류 페이지는 networkidle 이 늦을 수 있음 - 아래 존재 체크로 판단
+        if page.query_selector(ready_selector):
+            return
+        log.warning(
+            "세이브로 오류 페이지 감지 (title=%r), 재시도 %d/%d",
+            page.title(), attempt + 1, retries,
+        )
+        time.sleep(3)
+    raise RuntimeError(
+        "세이브로 사이트가 현재 페이지를 표시하지 못합니다 (사이트 점검 또는 일시 오류).\n"
+        "잠시 후 다시 시도해주세요. 계속되면 seibro.or.kr 을 브라우저로 열어 상태를 확인해보세요."
+    )
+
+
+def _js_click(page: Page, selector: str) -> None:
+    """
+    물리 클릭 대신 DOM click() 직접 호출.
+
+    세이브로 페이지는 GNB 드롭다운(ul.col_inner_ul)이나 검색 드롭다운 레이어
+    (dd#fn_group2.search_dd) 같은 요소가 클릭 대상 위에 겹쳐 있어서
+    page.click() 이 "intercepts pointer events" 로 실패하는 경우가 잦다
+    (조회 버튼에서 먼저 실측했고, 돋보기 아이콘 #fn_group4 도 같은 증상 실측).
+    겹침 여부는 그때그때 달라서 간헐적으로만 실패하는 게 함정 — 물리 클릭
+    대신 JS click() 을 쓰면 레이어 겹침과 무관하게 항상 동작한다.
+    """
+    page.wait_for_selector(selector, state="attached", timeout=8000)
+    page.eval_on_selector(selector, "el => el.click()")
 
 
 def _open_fund_search_popup(page: Page):
@@ -105,7 +160,8 @@ def _open_fund_search_popup(page: Page):
     # 참고: #Lpopup_wrap 은 wait_for_selector(state="visible") 로 기다리면
     # Playwright 가 "hidden"으로 오판하는 경우가 있어(실측: aria-hidden="false"인
     # 상태에서도 타임아웃 발생) state 체크 대신 짧은 sleep 후 iframe 을 바로 기다린다.
-    page.click("#fn_group4", timeout=5000)
+    # 물리 클릭은 검색 드롭다운 레이어(dd#fn_group2)가 간헐적으로 가로채므로 JS 클릭 사용.
+    _js_click(page, "#fn_group4")
     time.sleep(1.5)
     iframe_el = page.wait_for_selector("#iframeFnMn", timeout=8000)
     frame = iframe_el.content_frame()
@@ -161,8 +217,7 @@ def search_funds(keyword: str, headless: bool = True) -> list[dict]:
         )
         page = context.new_page()
         try:
-            page.goto(SEIBRO_URL, wait_until="domcontentloaded")
-            _wait_websquare(page)
+            _goto_with_retry(page, SEIBRO_URL, "#fn_group4")
 
             frame = _open_fund_search_popup(page)
             frame.fill("#search_string", keyword)
@@ -370,9 +425,8 @@ def crawl_fund_distribution(
         page = context.new_page()
 
         try:
-            # 1) 페이지 접속
-            page.goto(SEIBRO_URL, wait_until="domcontentloaded")
-            _wait_websquare(page)
+            # 1) 페이지 접속 (오류 페이지면 재시도)
+            _goto_with_retry(page, SEIBRO_URL, "#fn_group4")
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "01_landing.png")
 
@@ -403,7 +457,12 @@ def crawl_fund_distribution(
             log.error("타임아웃: %s", e)
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "error.png")
-            df = pd.DataFrame(columns=list(_COLUMN_LABELS.values()))
+            # 빈 결과를 돌려주면 "분배 이력이 없는 펀드"와 구분이 안 돼 오해를
+            # 부르므로(실측 피드백), 명확한 오류로 올린다
+            raise RuntimeError(
+                "세이브로 분배내역 조회 중 응답 시간 초과. 사이트가 느리거나 "
+                "일시 오류일 수 있으니 잠시 후 다시 시도해주세요."
+            ) from e
         finally:
             browser.close()
 
@@ -433,7 +492,8 @@ def _open_nav_search_popup(page: Page):
     분배내역 페이지와 동일하게 iframe#iframeFnMn 레이어 팝업 구조지만, 검색
     아이콘의 alt 텍스트가 "검색"으로 다르다(분배내역 페이지는 "검색하기").
     """
-    page.click("img[alt*='검색'], a:has(img[alt*='검색'])", timeout=5000)
+    # 분배내역 페이지 돋보기와 같은 간헐적 클릭 가로채기 문제가 있어 JS 클릭 사용
+    _js_click(page, "img[alt*='검색'], a:has(img[alt*='검색'])")
     time.sleep(1.5)
     iframe_el = page.wait_for_selector("#iframeFnMn", timeout=8000)
     frame = iframe_el.content_frame()
@@ -551,8 +611,7 @@ def crawl_fund_nav_history(
         page = context.new_page()
 
         try:
-            page.goto(FUND_NAV_URL, wait_until="domcontentloaded")
-            _wait_websquare(page)
+            _goto_with_retry(page, FUND_NAV_URL, "img[alt*='검색']")
 
             frame = _open_nav_search_popup(page)
             _search_fund_in_popup(frame, fund.name, target_isin=fund.isin)
@@ -578,7 +637,10 @@ def crawl_fund_nav_history(
             log.error("타임아웃: %s", e)
             if screenshot_dir:
                 page.screenshot(path=screenshot_dir / "nav_error.png")
-            df = pd.DataFrame(columns=list(_NAV_COLUMN_LABELS.values()))
+            raise RuntimeError(
+                "세이브로 기준가/순자산 조회 중 응답 시간 초과. 사이트가 느리거나 "
+                "일시 오류일 수 있으니 잠시 후 다시 시도해주세요."
+            ) from e
         finally:
             browser.close()
 
