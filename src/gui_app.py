@@ -367,6 +367,21 @@ class App(tk.Tk):
                     self.status_var.set(f"'{keyword}' 검색 결과가 없습니다. 다른 키워드로 검색해보세요.")
             else:  # "ok" - 조회 완료
                 _, target, dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary = item
+                if dist_df.empty and nav_df.empty:
+                    # 분배내역도 기준가도 전혀 없음 = 운용 종료(청산)됐거나
+                    # 세이브로에 자료가 없는 펀드로 추정. 빈 결과를 저장해봐야
+                    # 비교표만 지저분해지므로 안내만 하고 저장은 하지 않는다.
+                    self.text.delete("1.0", "end")
+                    self.text.insert(
+                        "1.0",
+                        f"조회한 펀드: {target['name']}\n\n"
+                        "최근 1년 분배내역과 기준가 데이터가 모두 없습니다.\n"
+                        "운용이 종료(청산)된 펀드이거나 세이브로에 자료가 없는 펀드로 보입니다.\n"
+                        "다른 펀드를 선택해 조회해보세요. (이 결과는 최근 검색 결과에 저장되지 않습니다)",
+                    )
+                    self.status_var.set(f"데이터 없음 (운용종료/청산 추정): {target['name']}")
+                    self.after(200, self._poll_queue)
+                    return
                 matched_name = self._extract_matched_name(dist_df, nav_df) or target["name"]
                 result_text = self._build_result_text(
                     dist_df, yield_summary, nav_df, aum_summary, vs_dist_summary, price_summary, matched_name
@@ -481,7 +496,11 @@ class App(tk.Tk):
                     f"분배 제외 순수 운용손익: {excl:+,.2f}억원 ({excl_pct:+.4f}%) — {sign}"
                 )
         else:
-            lines.append("(AUM 데이터 없음)")
+            lines.append(
+                "(순자산(AUM) 데이터 없음 — 세이브로가 이 펀드(클래스)의 순자산을 제공하지"
+                " 않는 경우입니다. 기준가·분배 정보는 위에 정상 표시됩니다."
+                " 같은 펀드의 다른 클래스를 조회하면 순자산이 나올 수 있습니다)"
+            )
         lines.append("")
         lines.append("--- 분배일별 AUM 변화 상세 (조회기간 전체) ---")
         lines.append(

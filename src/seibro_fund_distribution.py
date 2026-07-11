@@ -771,6 +771,13 @@ def summarize_aum_change_on_distribution(nav_df: pd.DataFrame) -> dict:
     df["기준일"] = pd.to_datetime(df["기준일"], format="%Y/%m/%d")
     df = df.sort_values("기준일").reset_index(drop=True)
     df["순자산_억원"] = pd.to_numeric(df["순자산"].str.replace(",", ""), errors="coerce")
+
+    # 실측(미래에셋 배당과인컴30 성과보수 클래스): 기준가는 매일 정상 갱신되는데
+    # 설정액·순자산이 전 기간 0 으로만 나오는 펀드(클래스)가 있다 - 세이브로가
+    # 해당 클래스의 순자산을 제공하지 않는 경우. 0 을 실제 값처럼 쓰면
+    # "순자산 0.00억원 → 0.00억원" 같은 거짓 결과가 나오므로 "데이터 없음"으로 처리
+    if not df["순자산_억원"].fillna(0).any():
+        return empty
     df["분배금_원"] = pd.to_numeric(df["분배금"].astype(str).str.replace(",", ""), errors="coerce")
     df["전일순자산_억원"] = df["순자산_억원"].shift(1)
     df["순자산증감_억원"] = df["순자산_억원"] - df["전일순자산_억원"]
